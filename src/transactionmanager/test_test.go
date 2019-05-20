@@ -140,7 +140,3 @@ func TestBasicFunctions(t *testing.T) {
 
 	fmt.Printf("  ... Passed\n")
 }
-
-func TestManyTransactions(t *testing.T) {
-
-}

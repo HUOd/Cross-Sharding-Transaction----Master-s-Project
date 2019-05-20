@@ -1,6 +1,5 @@
 package transactionmanager
 
-// import "cst/src/shardkv"
 import "cst/src/labrpc"
 import "crypto/rand"
 import "math/big"
@@ -208,6 +207,58 @@ func (ck *Clerk) UpdateState(TransactionID int, State TsState) Err {
 		for _, srv := range ck.servers {
 			var reply UpdateStateReply
 			ok := srv.Call("TransactionManager.UpdateState", args, &reply)
+			if ok && reply.WrongLeader == false && reply.Err == OK {
+				return OK
+			}
+
+			if ok && reply.WrongLeader == false && reply.Err != OK {
+				return reply.Err
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (ck *Clerk) AddBlockKey(TransactionID int, Key string, Op string) Err {
+	ck.LastOpSeqNum++
+	args := &AddBlockingKeyArgs{
+		TransactionNum:     TransactionID,
+		ClientID:           ck.ClientID,
+		ClientLastOpSeqNum: ck.LastOpSeqNum,
+		Key:                Key,
+		BlockingType:       Op,
+	}
+
+	for {
+		for _, srv := range ck.servers {
+			var reply AddBlockingKeyReply
+			ok := srv.Call("TransactionManager.AddBlockingKey", args, &reply)
+			if ok && reply.WrongLeader == false && reply.Err == OK {
+				return OK
+			}
+
+			if ok && reply.WrongLeader == false && reply.Err != OK {
+				return reply.Err
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (ck *Clerk) RemoveBlockKey(TransactionID int, Key string, Op string) Err {
+	ck.LastOpSeqNum++
+	args := &RemoveBlockingKeyArgs{
+		TransactionNum:     TransactionID,
+		ClientID:           ck.ClientID,
+		ClientLastOpSeqNum: ck.LastOpSeqNum,
+		Key:                Key,
+		BlockingType:       Op,
+	}
+
+	for {
+		for _, srv := range ck.servers {
+			var reply RemoveBlockingKeyReply
+			ok := srv.Call("TransactionManager.RemoveBlockingKey", args, &reply)
 			if ok && reply.WrongLeader == false && reply.Err == OK {
 				return OK
 			}

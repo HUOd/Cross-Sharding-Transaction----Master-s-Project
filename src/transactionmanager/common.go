@@ -102,3 +102,29 @@ type UpdateStateReply struct {
 	Err         Err
 	WrongLeader bool
 }
+
+type AddBlockingKeyArgs struct {
+	Key                string
+	BlockingType       string
+	TransactionNum     int
+	ClientID           int64
+	ClientLastOpSeqNum int
+}
+
+type AddBlockingKeyReply struct {
+	Err         Err
+	WrongLeader bool
+}
+
+type RemoveBlockingKeyArgs struct {
+	Key                string
+	BlockingType       string
+	TransactionNum     int
+	ClientID           int64
+	ClientLastOpSeqNum int
+}
+
+type RemoveBlockingKeyReply struct {
+	Err         Err
+	WrongLeader bool
+}

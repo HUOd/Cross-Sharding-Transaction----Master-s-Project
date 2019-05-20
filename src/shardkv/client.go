@@ -293,6 +293,10 @@ func (ck *Clerk) Prepare(key string, TransactionNum int) (bool, Err) {
 				if ok && reply.WrongLeader == false && reply.Err != OK {
 					return false, reply.Err
 				}
+
+				if !ok {
+					return false, ""
+				}
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -301,7 +305,7 @@ func (ck *Clerk) Prepare(key string, TransactionNum int) (bool, Err) {
 	}
 }
 
-func (ck *Clerk) Commit(key string, TransactionNum int) (Err, bool) {
+func (ck *Clerk) Commit(key string, TransactionNum int) (bool, Err) {
 	ck.LastOpSeqNum++
 	args := CommitArgs{
 		ClientID:           ck.ClientID,
@@ -330,7 +334,11 @@ func (ck *Clerk) Commit(key string, TransactionNum int) (Err, bool) {
 				var reply CommitReply
 				ok := srv.Call("ShardKV.Commit", &args, &reply)
 				if ok && reply.WrongLeader == false && reply.Err == OK {
-					return OK, true
+					return true, OK
+				}
+
+				if !ok {
+					return false, ""
 				}
 			}
 		}
@@ -363,6 +371,10 @@ func (ck *Clerk) Abort(key string, TransactionNum int) (bool, Err) {
 				ok := srv.Call("ShardKV.Abort", &args, &reply)
 				if ok && reply.WrongLeader == false && reply.Done {
 					return true, OK
+				}
+
+				if !ok {
+					return false, ""
 				}
 			}
 		}

@@ -15,6 +15,7 @@ import (
 const (
 	CLIENT_OP = "ClientOp"
 	TS_OP     = "TsOp"
+	BLOCK_OP  = "BlockOp"
 )
 
 const (
@@ -24,13 +25,17 @@ const (
 )
 
 const (
-	BEGIN        = "Begin"
-	START        = "Start"
-	PREPARE      = "Prepare"
-	COMMIT       = "Commit"
-	ABORT        = "Abort"
-	UPDATE       = "Update"
-	UPDATECONFIG = "UpdateConfig"
+	BEGIN   = "Begin"
+	START   = "Start"
+	PREPARE = "Prepare"
+	COMMIT  = "Commit"
+	ABORT   = "Abort"
+	UPDATE  = "Update"
+)
+
+const (
+	ADD    = "Add"
+	REMOVE = "Remove"
 )
 
 const (
@@ -67,17 +72,21 @@ type TransactionManager struct {
 
 	Killed bool
 
-	shardKVClientQ     *kvClientQ
-	ClientQ            *clientQ
-	ClientLastOpSeqNum map[int64]int
-	CallbackChanMap    map[int]chan OpReply
-	Transactions       []*Ts
+	shardKVClientQ        *kvClientQ
+	ClientQ               *clientQ
+	ClientLastOpSeqNum    map[int64]int
+	CallbackChanMap       map[int]chan OpReply
+	Transactions          []*Ts
+	UndeliveredAbortKeys  map[int]map[string]bool
+	UndeliveredCommitKeys map[int]map[string]bool
+	checkTimer            *time.Timer
 }
 
 type Op struct {
 	OpType   string
 	ClientOp ClientOpStruct
 	TsOp     TransactionOpStruct
+	BlockOp  BlockingOpStruct
 }
 
 type ClientOpStruct struct {
@@ -96,6 +105,15 @@ type TransactionOpStruct struct {
 	TransactionID  int
 	Key            string
 	Gid            int
+}
+
+type BlockingOpStruct struct {
+	OpName         string
+	BlockingType   string
+	ClientID       int64
+	ClientOpSeqNum int
+	TransactionID  int
+	Key            string
 }
 
 type OpReply struct {
@@ -420,6 +438,7 @@ func (tm *TransactionManager) Commit(args *CommitArgs, reply *CommitReply) {
 								client := tm.ClientQ.deQClient()
 								client.Abort(args.TransactionID)
 								tm.ClientQ.enQClient(client)
+
 								reply.Err = ErrAbort
 								break
 							}
@@ -433,8 +452,14 @@ func (tm *TransactionManager) Commit(args *CommitArgs, reply *CommitReply) {
 						tm.ClientQ.enQClient(client)
 						for _, key := range keys {
 							skv := tm.shardKVClientQ.deQkvClient()
-							skv.Commit(key, args.TransactionID)
+							res, _ := skv.Commit(key, args.TransactionID)
 							tm.shardKVClientQ.enQkvClient(skv)
+
+							if !res {
+								client := tm.ClientQ.deQClient()
+								client.AddBlockKey(args.TransactionID, key, COMMIT)
+								tm.ClientQ.enQClient(client)
+							}
 						}
 						client = tm.ClientQ.deQClient()
 						client.UpdateState(args.TransactionID, CommitState)
@@ -504,8 +529,14 @@ func (tm *TransactionManager) Abort(args *AbortArgs, reply *AbortReply) {
 
 						skv := tm.shardKVClientQ.deQkvClient()
 						DPrintf("TransactionManager %d send Abort the Transaction %d to kvclient %d. \n", tm.me, args.TransactionID, skv.ClientID)
-						skv.Abort(key, args.TransactionID)
+						res, _ := skv.Abort(key, args.TransactionID)
 						tm.shardKVClientQ.enQkvClient(skv)
+
+						if !res {
+							client := tm.ClientQ.deQClient()
+							client.AddBlockKey(args.TransactionID, key, ABORT)
+							tm.ClientQ.enQClient(client)
+						}
 					}
 
 					ts.KeyToGid = make(map[string]int)
@@ -634,6 +665,144 @@ func (tm *TransactionManager) UpdateState(args *UpdateStateArgs, reply *UpdateSt
 		}
 	} else {
 		reply.WrongLeader = true
+	}
+}
+
+func (tm *TransactionManager) AddBlockingKey(args *AddBlockingKeyArgs, reply *AddBlockingKeyReply) {
+	thisOperation := Op{
+		OpType: BLOCK_OP,
+		BlockOp: BlockingOpStruct{
+			OpName:         ADD,
+			BlockingType:   args.BlockingType,
+			ClientID:       args.ClientID,
+			ClientOpSeqNum: args.ClientLastOpSeqNum,
+			Key:            args.Key,
+			TransactionID:  args.TransactionNum,
+		},
+	}
+
+	newIndex, thisTerm, isLeader := tm.rf.Start(thisOperation)
+
+	if isLeader {
+		tm.mu.Lock()
+		mChan := make(chan OpReply)
+		tm.CallbackChanMap[newIndex] = mChan
+		DPrintf("TransactionManager %d started Add Blocking Request at index %d. \n", tm.me, newIndex)
+		tm.mu.Unlock()
+
+		for {
+			select {
+			case Or := <-mChan:
+				if curTerm, isLeader := tm.rf.GetState(); isLeader && thisTerm == curTerm {
+					if Or.Err == OK {
+						reply.Err = OK
+					} else {
+						reply.Err = Or.Err
+					}
+				} else {
+					reply.WrongLeader = true
+				}
+				return
+			case <-time.After(raft.HEART_BEAT_INTERVAL * time.Millisecond):
+				if _, isLeader := tm.rf.GetState(); !isLeader {
+					tm.mu.Lock()
+					delete(tm.CallbackChanMap, newIndex)
+					tm.mu.Unlock()
+					reply.WrongLeader = true
+					return
+				}
+			}
+		}
+	} else {
+		reply.WrongLeader = true
+	}
+}
+
+func (tm *TransactionManager) RemoveBlockingKey(args *RemoveBlockingKeyArgs, reply *RemoveBlockingKeyReply) {
+	thisOperation := Op{
+		OpType: BLOCK_OP,
+		BlockOp: BlockingOpStruct{
+			OpName:         REMOVE,
+			BlockingType:   args.BlockingType,
+			ClientID:       args.ClientID,
+			ClientOpSeqNum: args.ClientLastOpSeqNum,
+			Key:            args.Key,
+			TransactionID:  args.TransactionNum,
+		},
+	}
+
+	newIndex, thisTerm, isLeader := tm.rf.Start(thisOperation)
+
+	if isLeader {
+		tm.mu.Lock()
+		mChan := make(chan OpReply)
+		tm.CallbackChanMap[newIndex] = mChan
+		DPrintf("TransactionManager %d started Remove Blocking Request at index %d. \n", tm.me, newIndex)
+		tm.mu.Unlock()
+
+		for {
+			select {
+			case Or := <-mChan:
+				if curTerm, isLeader := tm.rf.GetState(); isLeader && thisTerm == curTerm {
+					if Or.Err == OK {
+						reply.Err = OK
+					} else {
+						reply.Err = Or.Err
+					}
+				} else {
+					reply.WrongLeader = true
+				}
+				return
+			case <-time.After(raft.HEART_BEAT_INTERVAL * time.Millisecond):
+				if _, isLeader := tm.rf.GetState(); !isLeader {
+					tm.mu.Lock()
+					delete(tm.CallbackChanMap, newIndex)
+					tm.mu.Unlock()
+					reply.WrongLeader = true
+					return
+				}
+			}
+		}
+	} else {
+		reply.WrongLeader = true
+	}
+}
+
+func (tm *TransactionManager) AddBlockingKeyApply(BlockOp BlockingOpStruct) {
+	if BlockOp.BlockingType == COMMIT {
+		if _, prs := tm.UndeliveredCommitKeys[BlockOp.TransactionID]; !prs {
+			tm.UndeliveredCommitKeys[BlockOp.TransactionID] = make(map[string]bool)
+		}
+
+		tm.UndeliveredCommitKeys[BlockOp.TransactionID][BlockOp.Key] = true
+	} else if BlockOp.BlockingType == ABORT {
+		if _, prs := tm.UndeliveredAbortKeys[BlockOp.TransactionID]; !prs {
+			tm.UndeliveredAbortKeys[BlockOp.TransactionID] = make(map[string]bool)
+		}
+
+		tm.UndeliveredAbortKeys[BlockOp.TransactionID][BlockOp.Key] = true
+	}
+}
+
+func (tm *TransactionManager) RemoveBlockingKeyApply(BlockOp BlockingOpStruct) {
+	if BlockOp.BlockingType == COMMIT {
+		if _, prs := tm.UndeliveredCommitKeys[BlockOp.TransactionID]; !prs {
+			return
+		}
+
+		delete(tm.UndeliveredCommitKeys[BlockOp.TransactionID], BlockOp.Key)
+		if len(tm.UndeliveredCommitKeys[BlockOp.TransactionID]) == 0 {
+			delete(tm.UndeliveredCommitKeys, BlockOp.TransactionID)
+		}
+	} else if BlockOp.BlockingType == ABORT {
+		if _, prs := tm.UndeliveredAbortKeys[BlockOp.TransactionID]; !prs {
+			return
+		}
+
+		delete(tm.UndeliveredAbortKeys[BlockOp.TransactionID], BlockOp.Key)
+		if len(tm.UndeliveredAbortKeys[BlockOp.TransactionID]) == 0 {
+			delete(tm.UndeliveredAbortKeys, BlockOp.TransactionID)
+		}
 	}
 }
 
@@ -773,6 +942,25 @@ func (tm *TransactionManager) runApplyOp() {
 					reply.Err = OK
 				}
 				tm.mu.Unlock()
+			} else if operation.OpType == BLOCK_OP {
+				BlockOp := operation.BlockOp
+				tm.mu.Lock()
+				lsn, prs := tm.ClientLastOpSeqNum[BlockOp.ClientID]
+
+				if !prs || (prs && lsn < BlockOp.ClientOpSeqNum) {
+					switch BlockOp.OpName {
+					case ADD:
+						tm.AddBlockingKeyApply(BlockOp)
+					case REMOVE:
+						tm.RemoveBlockingKeyApply(BlockOp)
+					}
+
+					tm.ClientLastOpSeqNum[BlockOp.ClientID] = BlockOp.ClientOpSeqNum
+				}
+				reply.Err = OK
+
+				tm.mu.Unlock()
+
 			}
 
 			tm.mu.Lock()
@@ -785,6 +973,56 @@ func (tm *TransactionManager) runApplyOp() {
 			}
 			tm.mu.Unlock()
 		}
+	}
+}
+
+func (tm *TransactionManager) runCheckBlock() {
+	for {
+		<-tm.checkTimer.C
+
+		if _, isLeader := tm.rf.GetState(); isLeader {
+			tm.mu.Lock()
+			for tnum, keys := range tm.UndeliveredAbortKeys {
+				for key := range keys {
+					tm.mu.Unlock()
+					skv := tm.shardKVClientQ.deQkvClient()
+					DPrintf("TransactionManager %d send Abort the Transaction %d to kvclient %d. \n", tm.me, tnum, skv.ClientID)
+					res, _ := skv.Abort(key, tnum)
+					tm.shardKVClientQ.enQkvClient(skv)
+
+					if res {
+						client := tm.ClientQ.deQClient()
+						client.RemoveBlockKey(tnum, key, ABORT)
+						tm.ClientQ.enQClient(client)
+					}
+
+					tm.mu.Lock()
+				}
+			}
+			tm.mu.Unlock()
+
+			tm.mu.Lock()
+			for tnum, keys := range tm.UndeliveredCommitKeys {
+				for key := range keys {
+					tm.mu.Unlock()
+					skv := tm.shardKVClientQ.deQkvClient()
+					DPrintf("TransactionManager %d send Abort the Transaction %d to kvclient %d. \n", tm.me, tnum, skv.ClientID)
+					res, _ := skv.Commit(key, tnum)
+					tm.shardKVClientQ.enQkvClient(skv)
+
+					if res {
+						client := tm.ClientQ.deQClient()
+						client.RemoveBlockKey(tnum, key, COMMIT)
+						tm.ClientQ.enQClient(client)
+					}
+
+					tm.mu.Lock()
+				}
+			}
+			tm.mu.Unlock()
+		}
+
+		tm.checkTimer.Reset(200 * time.Millisecond)
 	}
 }
 
@@ -813,12 +1051,16 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	}
 	tm.ClientQ = newClientQ(clients)
 	tm.shardKVClientQ = newkvClientQ(shardKvClients)
+	tm.UndeliveredAbortKeys = make(map[int]map[string]bool)
+	tm.UndeliveredCommitKeys = make(map[int]map[string]bool)
 
 	tm.rf = raft.Make(servers, me, persister, tm.applyCh)
 
 	tm.Killed = false
+	tm.checkTimer = time.NewTimer(200 * time.Millisecond)
 
 	go tm.runApplyOp()
+	go tm.runCheckBlock()
 
 	return tm
 }
