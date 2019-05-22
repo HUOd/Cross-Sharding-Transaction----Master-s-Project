@@ -39,6 +39,8 @@ const ( // shard state for each shard group
 	SENDING
 )
 
+const TransactionTimeOut = 5 * time.Minute
+
 const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -127,6 +129,7 @@ type ShardKV struct {
 	LatestClientOpSeqNum    map[int]map[int64]int
 
 	// Transactions
+	TransactionTimeoutTimer  *time.Timer
 	ShadowDataCompare        map[int]map[int]map[string]string // transactionnum->shard->kv
 	ShadowData               map[int]map[int]map[string]string // transactionnum->shard->kv
 	PreparedKeys             map[string]int
@@ -134,6 +137,7 @@ type ShardKV struct {
 	PendingShadowData        map[int]map[int]map[int]map[string]string // configNum->transactionnum->shard->kv
 	PendingPreparedKeys      map[int]map[string]int
 	DecisionQueue            []Decision // Decision queue for prepare state
+	TransactionTimers        map[int]*time.Timer
 }
 
 func copyStrStrMap(m map[string]string) map[string]string {
@@ -1009,10 +1013,12 @@ func (kv *ShardKV) applyReceivedData(receivedShard ReceivedShardStruct) {
 
 		kv.ShadowData[tnum][receivedShard.Shard] = copyStrStrMap(receivedShard.ShadowData[tnum])
 		kv.ShadowDataCompare[tnum][receivedShard.Shard] = copyStrStrMap(receivedShard.ShadowDataCompare[tnum])
+		kv.TransactionTimers[tnum] = time.NewTimer(TransactionTimeOut)
 	}
 
-	for key := range receivedShard.PreparedKeys {
+	for key, tnum := range receivedShard.PreparedKeys {
 		kv.PreparedKeys[key] = receivedShard.PreparedKeys[key]
+		delete(kv.TransactionTimers, tnum)
 	}
 
 	for len(kv.DecisionQueue) > 0 {
@@ -1123,6 +1129,7 @@ func (kv *ShardKV) setUpPrepare(Ts TransactionStruct, reply *PrepareReply) {
 						if shadowingValue == value {
 							kv.PreparedKeys[Ts.Key] = Ts.TransactionNum
 							reply.Err = OK
+							delete(kv.TransactionTimers, Ts.TransactionNum)
 						} else {
 							reply.Err = ErrChanged
 						}
@@ -1198,6 +1205,8 @@ func (kv *ShardKV) commitKey(Ts TransactionStruct) {
 				}
 			}
 		}
+
+		delete(kv.TransactionTimers, Ts.TransactionNum)
 	}
 }
 
@@ -1244,6 +1253,8 @@ func (kv *ShardKV) abortTransaction(Ts TransactionStruct) {
 				}
 			}
 		}
+
+		delete(kv.TransactionTimers, Ts.TransactionNum)
 	}
 }
 
@@ -1253,17 +1264,20 @@ func (kv *ShardKV) setUpShadow(Key string, TransactionNum int) {
 	if _, prs := kv.ShadowDataCompare[TransactionNum]; !prs {
 		kv.ShadowDataCompare[TransactionNum] = make(map[int]map[string]string)
 		kv.ShadowData[TransactionNum] = make(map[int]map[string]string)
+		kv.TransactionTimers[TransactionNum] = time.NewTimer(TransactionTimeOut)
 	}
 
 	if _, prs := kv.ShadowDataCompare[TransactionNum][shard]; !prs {
 		kv.ShadowDataCompare[TransactionNum][shard] = make(map[string]string)
 		kv.ShadowData[TransactionNum][shard] = make(map[string]string)
+		kv.TransactionTimers[TransactionNum].Reset(TransactionTimeOut)
 	}
 
 	if _, prs := kv.ShadowDataCompare[TransactionNum][shard][Key]; !prs {
 		if _, prs := kv.LocalData[shard][Key]; prs {
 			kv.ShadowDataCompare[TransactionNum][shard][Key] = kv.LocalData[shard][Key]
 			kv.ShadowData[TransactionNum][shard][Key] = kv.LocalData[shard][Key]
+			kv.TransactionTimers[TransactionNum].Reset(TransactionTimeOut)
 		}
 	}
 }
@@ -1465,6 +1479,41 @@ func (kv *ShardKV) runCheckShardReceivingStatus() {
 	}
 }
 
+func (kv *ShardKV) runCheckTransactionTimeOut() {
+	for {
+		<-kv.TransactionTimeoutTimer.C
+
+		kv.mu.Lock()
+		tnums := make([]int, 0)
+		for tnum, timer := range kv.TransactionTimers {
+			to := false
+			select {
+			case <-timer.C:
+				to = true
+			default:
+				break
+			}
+
+			if to {
+				tnums = append(tnums, tnum)
+			}
+		}
+
+		for tnum := range tnums {
+			for _, data := range kv.ShadowDataCompare[tnum] {
+				for key := range data {
+					ts := TransactionStruct{TransactionNum: tnum, Key: key}
+					kv.abortTransaction(ts)
+				}
+			}
+		}
+
+		kv.mu.Unlock()
+
+		kv.TransactionTimeoutTimer.Reset(200 * time.Millisecond)
+	}
+}
+
 // // Deleteing shard not really work
 // func (kv *ShardKV) runCheckShardSendingStatus() {
 // 	for {
@@ -1646,6 +1695,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.PendingPreparedKeys = make(map[int]map[string]int)
 	kv.DecisionQueue = make([]Decision, 0)
 	kv.shardMaster = shardmaster.MakeClerk(masters)
+	kv.TransactionTimers = make(map[int]*time.Timer)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 
@@ -1659,7 +1709,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	kv.configTimer = time.NewTimer(80 * time.Millisecond)
 	kv.receivingTimer = time.NewTimer(raft.HEART_BEAT_INTERVAL * time.Millisecond)
+	kv.TransactionTimeoutTimer = time.NewTimer(200 * time.Millisecond)
 
+	go kv.runCheckTransactionTimeOut()
 	go kv.runChecking()
 	go kv.runApplyOp()
 
