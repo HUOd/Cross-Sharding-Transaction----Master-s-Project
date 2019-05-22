@@ -14,8 +14,6 @@ package shardmaster
 // #0 is the initial configuration, with no groups and all shards
 // assigned to group 0 (the invalid group).
 //
-// You will need to add fields to the RPC argument structs.
-//
 
 // The number of shards.
 const NShards = 10
@@ -35,7 +33,7 @@ const (
 type Err string
 
 type JoinArgs struct {
-	Servers        map[int][]string // new GID -> servers mappings
+	Servers        map[int][]string // new GID -> servers
 	ClientID       int64
 	ClientOpSeqNum int
 }

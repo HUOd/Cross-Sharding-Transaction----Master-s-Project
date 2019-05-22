@@ -12,19 +12,19 @@ import "fmt"
 
 // import "strconv"
 
-const ( // Client Op name
+const ( // Client Op Name
 	GET    = "Get"
 	PUT    = "Put"
 	APPEND = "Append"
 )
 
-const (
+const ( // Transaction Op Name
 	PREPARE = "Prepare"
 	COMMIT  = "Commit"
-	ABORT   = "ABORT"
+	ABORT   = "Abort"
 )
 
-const (
+const ( // Op struct Op type
 	CLINET_OP      = "ClientOp"
 	SENDING_SHARD  = "SendingShard"
 	RECEIVED_SHARD = "ReceivingShard"
@@ -32,7 +32,7 @@ const (
 	TRANSACTION    = "Transaction"
 )
 
-const (
+const ( // shard state for each shard group
 	UNSERVE = iota
 	SERVE
 	RECEIVING
@@ -49,15 +49,12 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
-	OpType        string // ClientOp / SendingShard / ReceivingShard / NewConfig
-	ClientOp      ClientOpStruct
-	NewConfig     shardmaster.Config
-	SendingShard  SendingShardStruct
-	ReceivedShard ReceivedShardStruct
-	Transaction   TransactionStruct
+	OpType        string              // ClientOp / SendingShard / ReceivingShard / NewConfig
+	ClientOp      ClientOpStruct      // struct for ClientOp
+	NewConfig     shardmaster.Config  // new config for NewConfig
+	SendingShard  SendingShardStruct  // for deleting the local shard
+	ReceivedShard ReceivedShardStruct // for install a new shard
+	Transaction   TransactionStruct   // for transaction
 }
 
 type ClientOpStruct struct {
@@ -114,19 +111,19 @@ type ShardKV struct {
 	masters      []*labrpc.ClientEnd
 	maxraftstate int // snapshot if log grows this big
 
-	// Your definitions here.
+	// common server's functional part
 	Killed                  bool
 	KillChan                chan struct{}
 	configTimer             *time.Timer
 	receivingTimer          *time.Timer
-	ReceivingShards         map[int]int
-	PendingData             map[int]map[int]map[string]string
-	PendingOpSeqNum         map[int]map[int]map[int64]int
+	ReceivingShards         map[int]int                       // set for knowing which shard are receiving
+	PendingData             map[int]map[int]map[string]string // store the previous data from previous config  configNum -> shard -> key-value
+	PendingOpSeqNum         map[int]map[int]map[int64]int     // store the clientOp num from previous config  configNum -> shard -> clientID-clientSeqNum
 	shardMaster             *shardmaster.Clerk
 	ApplyingConfigNum       int
 	ShardStatus             [shardmaster.NShards]int
-	LogIndexCallbackChanMap map[int]chan OpReply
-	LocalData               map[int]map[string]string
+	LogIndexCallbackChanMap map[int]chan OpReply      // Call back channel
+	LocalData               map[int]map[string]string // Primary data store
 	LatestClientOpSeqNum    map[int]map[int64]int
 
 	// Transactions
@@ -136,7 +133,7 @@ type ShardKV struct {
 	PendingShadowDataCompare map[int]map[int]map[int]map[string]string // configNum->transactionnum->shard->kv
 	PendingShadowData        map[int]map[int]map[int]map[string]string // configNum->transactionnum->shard->kv
 	PendingPreparedKeys      map[int]map[string]int
-	DecisionQueue            []Decision
+	DecisionQueue            []Decision // Decision queue for prepare state
 }
 
 func copyStrStrMap(m map[string]string) map[string]string {
@@ -192,8 +189,8 @@ func copyConfig(newConfig shardmaster.Config) shardmaster.Config {
 	return c
 }
 
+// Get request, non-transaction Operation has TransactionNum 0
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
 	DPrintf("ShardKV %d at %d received Get Request from Client %d. \n", kv.me, kv.gid, args.ClientID)
 	shard := key2shard(args.Key)
 	if _, isLeader := kv.Rf.GetState(); isLeader {
@@ -302,8 +299,8 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	}
 }
 
+// PutAppend request, non-transaction Operation has TransactionNum 0
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
 	DPrintf("ShardKV %d at %d received %v Request from Client %d. \n", kv.me, kv.gid, args.Op, args.ClientID)
 	if _, isLeader := kv.Rf.GetState(); isLeader {
 		kv.mu.Lock()
@@ -392,6 +389,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 }
 
+// Prepare request from transaction manager. Return vote Decision
 func (kv *ShardKV) Prepare(args *PrepareArgs, reply *PrepareReply) {
 	DPrintf("ShardKV %d at %d received Prepare Request from Client %d for Transaction %d. \n", kv.me, kv.gid, args.ClientID, args.TransactionNum)
 	if _, isLeader := kv.Rf.GetState(); isLeader {
@@ -479,6 +477,7 @@ func (kv *ShardKV) Prepare(args *PrepareArgs, reply *PrepareReply) {
 	}
 }
 
+//Commit request from Transaction manager. Return Done
 func (kv *ShardKV) Commit(args *CommitArgs, reply *CommitReply) {
 	DPrintf("ShardKV %d at %d received Commit Request from Client %d for Transaction %d. \n", kv.me, kv.gid, args.ClientID, args.TransactionNum)
 	if _, isLeader := kv.Rf.GetState(); isLeader {
@@ -536,6 +535,7 @@ func (kv *ShardKV) Commit(args *CommitArgs, reply *CommitReply) {
 	}
 }
 
+//Abort request from Transaction manager. Return Done
 func (kv *ShardKV) Abort(args *AbortArgs, reply *AbortReply) {
 	DPrintf("ShardKV %d at %d received Abort Request from Client %d for Transaction %d. \n", kv.me, kv.gid, args.ClientID, args.TransactionNum)
 	if _, isLeader := kv.Rf.GetState(); isLeader {
@@ -592,6 +592,7 @@ func (kv *ShardKV) Abort(args *AbortArgs, reply *AbortReply) {
 	}
 }
 
+// Add a newconfig and broadcastToFollowers
 func (kv *ShardKV) registerNewConfig(NewConfig shardmaster.Config) {
 
 	// kv.mu.Lock()
@@ -613,6 +614,7 @@ func (kv *ShardKV) registerNewConfig(NewConfig shardmaster.Config) {
 	}
 }
 
+// start delete the pending data in shard group
 func (kv *ShardKV) StartSendSucceed(args *DeleteShardDataArgs) bool {
 
 	kv.mu.Lock()
@@ -664,6 +666,7 @@ func (kv *ShardKV) StartSendSucceed(args *DeleteShardDataArgs) bool {
 	return false
 }
 
+// start receiving the pending data in shard group
 func (kv *ShardKV) StartReceivedSucceed(args *RequestShardDataReply) bool {
 
 	kv.mu.Lock()
@@ -729,9 +732,9 @@ func (kv *ShardKV) StartReceivedSucceed(args *RequestShardDataReply) bool {
 	return false
 }
 
+// find the data in pending data, send it to the requester
 func (kv *ShardKV) RequestShardData(args *RequestShardDataArgs, reply *RequestShardDataReply) {
 
-	// if _, isLeader := kv.rf.GetState(); isLeader {
 	DPrintf("ShardKV %d at %d received RequestShardData RPC from %d for config num %d and shard %d. \n", kv.me, kv.gid, args.Gid, args.ConfigNum, args.Shard)
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
@@ -771,13 +774,9 @@ func (kv *ShardKV) RequestShardData(args *RequestShardDataArgs, reply *RequestSh
 	} else {
 		DPrintf("ShardKV %d at %d reply RequestShardData RPC from %d with ERR, such config num %d not apply. \n", kv.me, kv.gid, args.Gid, args.ConfigNum)
 		kv.PrintShardStatus()
-		// go kv.runCheckNewConfig()
 	}
 	reply.Err = ErrWrongGroup
 	return
-	// }
-
-	// DPrintf("ShardKV %d at %d is not leader, reject RequestShardData RPC. \n", kv.me, kv.gid)
 }
 
 func (kv *ShardKV) DeleteShardData(args *DeleteShardDataArgs, reply *DeleteShardDataReply) {
@@ -801,8 +800,8 @@ func (kv *ShardKV) DeleteShardData(args *DeleteShardDataArgs, reply *DeleteShard
 	DPrintf("ShardKV %d at %d is not leader, reject InstallShardData RPC. \n", kv.me, kv.gid)
 }
 
+// Shard request Receiving shard
 func (kv *ShardKV) AddNewShard(newShard int, config shardmaster.Config, mChan chan struct{}) {
-	// if _, isLeader := kv.rf.GetState(); isLeader {
 	DPrintf("ShardKV %d at %d is trying adding shard %d. at config num %d. \n", kv.me, kv.gid, newShard, kv.ApplyingConfigNum)
 
 	args := &RequestShardDataArgs{
@@ -824,12 +823,7 @@ func (kv *ShardKV) AddNewShard(newShard int, config shardmaster.Config, mChan ch
 			kv.StartReceivedSucceed(reply)
 			break
 		}
-		// else if ok && reply.Err == ErrWrongGroup {
-		// 	break
-		// }
 	}
-
-	// }
 
 	mChan <- struct{}{}
 }
@@ -1001,6 +995,7 @@ func (kv *ShardKV) applyNewConfig(NewConfig shardmaster.Config) {
 	kv.PrintShardStatus()
 }
 
+// Install the received data
 func (kv *ShardKV) applyReceivedData(receivedShard ReceivedShardStruct) {
 	DPrintf("ShardKV %d at %d applied the received data at shard %d, config num %d. \n", kv.me, kv.gid, receivedShard.Shard, kv.ApplyingConfigNum)
 	kv.LocalData[receivedShard.Shard] = copyStrStrMap(receivedShard.Data)
@@ -1155,7 +1150,7 @@ func (kv *ShardKV) setUpPrepare(Ts TransactionStruct, reply *PrepareReply) {
 
 func (kv *ShardKV) commitKey(Ts TransactionStruct) {
 	shard := key2shard(Ts.Key)
-	if kv.ShardStatus[shard] == RECEIVING {
+	if kv.ShardStatus[shard] == RECEIVING { // When shard group is receiving, put the decision into Decision Queue
 
 		decision := Decision{
 			TransactionID: Ts.TransactionNum,
@@ -1298,9 +1293,7 @@ func (kv *ShardKV) runApplyOp() {
 			return
 		}
 
-		// DPrintf("ShardKV %d at %d blocks here #1 ?. \n", kv.me, kv.gid)
 		am := <-kv.applyCh
-		// DPrintf("ShardKV %d at %d blocks here #2 ?. \n", kv.me, kv.gid)
 
 		if am.CommandValid && am.Command != nil {
 			operation := am.Command.(Op)
@@ -1440,9 +1433,6 @@ func (kv *ShardKV) runApplyOp() {
 }
 
 func (kv *ShardKV) runCheckShardReceivingStatus() {
-	// for {
-
-	// <-kv.receivingTimer.C
 
 	if _, isLeader := kv.Rf.GetState(); isLeader {
 
@@ -1473,11 +1463,9 @@ func (kv *ShardKV) runCheckShardReceivingStatus() {
 		}
 
 	}
-
-	// kv.receivingTimer.Reset(50 * time.Millisecond)
-	// }
 }
 
+// // Deleteing shard not really work
 // func (kv *ShardKV) runCheckShardSendingStatus() {
 // 	for {
 // 		if _, isLeader := kv.rf.GetState(); isLeader {
@@ -1500,9 +1488,6 @@ func (kv *ShardKV) runCheckShardReceivingStatus() {
 // }
 
 func (kv *ShardKV) runCheckNewConfig() {
-	// for {
-
-	// 	<-kv.configTimer.C
 
 	if _, isLeader := kv.Rf.GetState(); isLeader {
 
@@ -1518,9 +1503,6 @@ func (kv *ShardKV) runCheckNewConfig() {
 		}
 		kv.mu.Unlock()
 	}
-
-	// kv.configTimer.Reset(80 * time.Millisecond)
-	// }
 }
 
 func (kv *ShardKV) runChecking() {
@@ -1592,7 +1574,6 @@ func (kv *ShardKV) Kill() {
 	kv.Killed = true
 
 	go kv.Rf.Kill()
-	// Your code here, if desired.
 	DPrintf("ShardKV %d at %d ----- Killed! ------ \n", kv.me, kv.gid)
 	fmt.Printf("")
 }
@@ -1641,7 +1622,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.gid = gid
 	kv.masters = masters
 
-	// Your initialization code here.
 	kv.LocalData = make(map[int]map[string]string)
 	kv.LatestClientOpSeqNum = make(map[int]map[int64]int)
 	kv.LogIndexCallbackChanMap = make(map[int]chan OpReply)
@@ -1667,9 +1647,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.DecisionQueue = make([]Decision, 0)
 	kv.shardMaster = shardmaster.MakeClerk(masters)
 
-	// Use something like this to talk to the shardmaster:
-	// kv.mck = shardmaster.MakeClerk(kv.masters)
-
 	kv.applyCh = make(chan raft.ApplyMsg)
 
 	if snapshotData := persister.ReadSnapshot(); kv.maxraftstate != -1 && snapshotData != nil && len(snapshotData) > 0 {
@@ -1683,10 +1660,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.configTimer = time.NewTimer(80 * time.Millisecond)
 	kv.receivingTimer = time.NewTimer(raft.HEART_BEAT_INTERVAL * time.Millisecond)
 
-	// go kv.runCheckNewConfig()
-	// go kv.runCheckShardReceivingStatus()
-	// go kv.runPrintShardStatus()
-	// go kv.runCheckShardSendingStatus()
 	go kv.runChecking()
 	go kv.runApplyOp()
 

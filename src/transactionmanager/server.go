@@ -5,26 +5,25 @@ import (
 	"cst/src/labrpc"
 	"cst/src/raft"
 	"cst/src/shardkv"
-	// "cst/src/shardmaster"
 	"log"
 	"strconv"
 	"sync"
 	"time"
 )
 
-const (
+const ( // Op type
 	CLIENT_OP = "ClientOp"
 	TS_OP     = "TsOp"
 	BLOCK_OP  = "BlockOp"
 )
 
-const (
+const ( // Client Op
 	GET    = "GET"
 	PUT    = "Put"
 	APPEND = "Append"
 )
 
-const (
+const ( // Transaction Op
 	BEGIN   = "Begin"
 	START   = "Start"
 	PREPARE = "Prepare"
@@ -33,12 +32,12 @@ const (
 	UPDATE  = "Update"
 )
 
-const (
+const ( // Transaction Update Op
 	ADD    = "Add"
 	REMOVE = "Remove"
 )
 
-const (
+const ( // Transaction State
 	ActiveState  = "Active"
 	StartState   = "Start"
 	PrepareState = "Prepare"
@@ -48,6 +47,7 @@ const (
 
 type TsState string
 
+// Ts is the basic Transaction Record stored in Transaction Manager
 type Ts struct {
 	Num      int
 	State    TsState
@@ -72,11 +72,12 @@ type TransactionManager struct {
 
 	Killed bool
 
-	shardKVClientQ        *kvClientQ
-	ClientQ               *clientQ
-	ClientLastOpSeqNum    map[int64]int
-	CallbackChanMap       map[int]chan OpReply
-	Transactions          []*Ts
+	shardKVClientQ     *kvClientQ
+	ClientQ            *clientQ
+	ClientLastOpSeqNum map[int64]int
+	CallbackChanMap    map[int]chan OpReply
+	Transactions       []*Ts
+	// When Rpc call failed, TM should continuely send the request to avoid blocking on shard
 	UndeliveredAbortKeys  map[int]map[string]bool
 	UndeliveredCommitKeys map[int]map[string]bool
 	checkTimer            *time.Timer

@@ -16,6 +16,7 @@ package raft
 //   should send an ApplyMsg to the service (or tester)
 //   in the same server.
 //
+// There are some of the Algorithm logic or methods of this raft implementation are copied from https://github.com/tiraffe/MIT-6.824-2017/blob/master/src/raft/raft.go
 
 import (
 	"bytes"
@@ -220,10 +221,9 @@ type RequestVoteReply struct {
 }
 
 //
-// example RequestVote RPC handler.
+//RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -445,9 +445,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	rf.LastApplied = 0
 	rf.commitCondVar.Broadcast()
-	// go func() {
-	// 	rf.ApplyCh <- ApplyMsg{CommandValid: false, CommandIndex: args.LastIncludedIndex, IsSnapshot: true, SnapshotData: args.Data}
-	// }()
 
 	rf.persist()
 }
@@ -505,7 +502,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // turn off debug output from this instance.
 //
 func (rf *Raft) Kill() {
-	// Your code here, if desired.
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	rf.Killed = true
@@ -536,7 +532,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
-	// Your initialization code here (2A, 2B, 2C).
 	rf.CurrentTerm = 0
 	rf.VotedFor = -1
 	rf.Killed = true
@@ -556,6 +551,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitCondVar = sync.NewCond(&rf.mu)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	//
 	rf.ElectionTimer = time.NewTimer(generateRandomElectionTimeOut())
 
 	go rf.Run()
@@ -563,7 +559,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-//Run is the server thread
+//Run is the main thread of the server
 func (rf *Raft) Run() {
 
 	RDPrintf("Raft #%d start running.\n", rf.me)
@@ -573,6 +569,7 @@ func (rf *Raft) Run() {
 	go rf.runApplyMsg()
 }
 
+// Election Check by Election time period
 func (rf *Raft) checkElectionTimeout() {
 	for {
 		if rf.Killed {
@@ -594,6 +591,7 @@ func (rf *Raft) checkElectionTimeout() {
 	}
 }
 
+// Sending Heart Beats by time period
 func (rf *Raft) runHeartBeats() {
 	for {
 		if rf.Killed {
@@ -610,6 +608,7 @@ func (rf *Raft) runHeartBeats() {
 	}
 }
 
+// Apply the Log by commitIndex
 func (rf *Raft) runApplyMsg() {
 	for {
 		if rf.Killed {
@@ -630,6 +629,7 @@ func (rf *Raft) startElection() {
 	go rf.broadCastRequestVote()
 }
 
+// Vote Procedure on Candidate
 func (rf *Raft) broadCastRequestVote() {
 
 	voteChan := make(chan bool)
@@ -660,10 +660,7 @@ func (rf *Raft) broadCastRequestVote() {
 				} else {
 					RDPrintf("Raft #%d didn't recive vote result from Server #%d at Term #%d!\n", rf.me, server, prevTerm)
 				}
-			case <-time.After(100 * time.Millisecond):
-				//election time out
 			}
-			// voteChan <- ok && reply.VoteGranted
 		}(i)
 	}
 
@@ -689,6 +686,7 @@ func (rf *Raft) broadCastRequestVote() {
 	}
 }
 
+// Sending Log Repliction or Snapshot to Follower
 func (rf *Raft) broadCastAppendEntries() {
 	sendLogEntriesToClient := func(server int) bool {
 
@@ -796,6 +794,7 @@ func (rf *Raft) broadCastAppendEntries() {
 	}
 }
 
+// A commom check and update state machine, copy from https://github.com/tiraffe/MIT-6.824-2017/blob/master/src/raft/raft.go
 func (rf *Raft) updateCurrentTerm(Term int) {
 	rf.mu.Lock()
 	if Term > rf.CurrentTerm {
@@ -822,6 +821,7 @@ func (rf *Raft) setUpLeader() {
 	}
 }
 
+// Note: server can change to it's same state
 func (rf *Raft) changeStateTo(newState int) {
 	states := []string{"StateLeader", "StateFollower", "StateCandidate"}
 	preState := rf.State
@@ -849,6 +849,8 @@ func (rf *Raft) changeStateTo(newState int) {
 	}
 }
 
+// Update the Leader commit Index
+// Method described in paper not work in my case, copy the code from https://github.com/tiraffe/MIT-6.824-2017/blob/master/src/raft/raft.go
 func (rf *Raft) updateLeaderCommitIndex() {
 	if rf.State == StateLeader {
 		total := len(rf.MatchIndex)

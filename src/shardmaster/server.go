@@ -38,7 +38,6 @@ type ShardMaster struct {
 }
 
 type Op struct {
-	// Your data here.
 	OpName         string // Join/Leave/Move/Query
 	ClientID       int64
 	ClientOpSeqNum int
@@ -55,7 +54,7 @@ type Op struct {
 }
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
-	// Your code here.
+
 	DPrintf("ShardMaster %d received Join request from client %d \n", sm.me, args.ClientID)
 
 	thisOperation := Op{
@@ -106,7 +105,7 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 }
 
 func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
-	// Your code here.
+
 	DPrintf("ShardMaster %d received Leave request from client %d \n", sm.me, args.ClientID)
 	leaveGIDs := make([]int, len(args.GIDs))
 	copy(leaveGIDs, args.GIDs)
@@ -159,7 +158,7 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
-	// Your code here.
+
 	DPrintf("ShardMaster %d received Move request from client %d \n", sm.me, args.ClientID)
 
 	thisOperation := Op{
@@ -211,7 +210,6 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
-	// Your code here.
 	DPrintf("ShardMaster %d received Query request from client %d \n", sm.me, args.ClientID)
 
 	thisOperation := Op{
@@ -277,7 +275,6 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 func (sm *ShardMaster) Kill() {
 	DPrintf("ShardMaster %d has been ---- Killed ----! \n", sm.me)
 	sm.rf.Kill()
-	// Your code here, if desired.
 }
 
 // needed by shardkv tester
@@ -348,7 +345,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
 
 	sm.Killed = false
-	// Your code here.
+
 	go sm.runApplyOp()
 
 	DPrintf("ShardMaster %d has been ****Started!**** !\n", sm.me)
@@ -377,6 +374,7 @@ func (sm *ShardMaster) getConfig(index int) Config {
 	return res
 }
 
+// Rebalance the shards through the gid
 func (sm *ShardMaster) balanceShards(latestConfig *Config) {
 	listOfGID := make([]int, 0)
 	for k := range latestConfig.Groups {
