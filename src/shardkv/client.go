@@ -354,6 +354,7 @@ func (ck *Clerk) Abort(key string, TransactionNum int) (bool, Err) {
 	args := AbortArgs{
 		ClientID:           ck.ClientID,
 		ClientLastOpSeqNum: ck.LastOpSeqNum,
+		Key:                key,
 		TransactionNum:     TransactionNum,
 	}
 

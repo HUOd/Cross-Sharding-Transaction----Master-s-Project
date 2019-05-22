@@ -82,7 +82,7 @@ type ReceivedShardStruct struct {
 	LastOpSeqNum      map[int64]int
 	ShadowData        map[int]map[string]string
 	ShadowDataCompare map[int]map[string]string
-	KeyToTs           map[string]map[int]bool
+	PreparedKeys      map[string]int
 }
 
 type TransactionStruct struct {
@@ -96,6 +96,12 @@ type TransactionStruct struct {
 type OpReply struct {
 	Err   Err
 	value string
+}
+
+type Decision struct {
+	TransactionID int
+	Key           string
+	Op            string
 }
 
 type ShardKV struct {
@@ -124,9 +130,13 @@ type ShardKV struct {
 	LatestClientOpSeqNum    map[int]map[int64]int
 
 	// Transactions
-	ShadowDataCompare map[int]map[int]map[string]string // transactionnum->shard->kv
-	ShadowData        map[int]map[int]map[string]string // transactionnum->shard->kv
-	PreparedKeys      map[string]int
+	ShadowDataCompare        map[int]map[int]map[string]string // transactionnum->shard->kv
+	ShadowData               map[int]map[int]map[string]string // transactionnum->shard->kv
+	PreparedKeys             map[string]int
+	PendingShadowDataCompare map[int]map[int]map[int]map[string]string // configNum->transactionnum->shard->kv
+	PendingShadowData        map[int]map[int]map[int]map[string]string // configNum->transactionnum->shard->kv
+	PendingPreparedKeys      map[int]map[string]int
+	DecisionQueue            []Decision
 }
 
 func copyStrStrMap(m map[string]string) map[string]string {
@@ -139,6 +149,14 @@ func copyStrStrMap(m map[string]string) map[string]string {
 
 func copyInt64IntMap(m map[int64]int) map[int64]int {
 	res := make(map[int64]int)
+	for k, v := range m {
+		res[k] = v
+	}
+	return res
+}
+
+func copyStrIntMap(m map[string]int) map[string]int {
+	res := make(map[string]int)
 	for k, v := range m {
 		res[k] = v
 	}
@@ -196,11 +214,6 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Lock()
 		if kv.ShardStatus[shard] == SERVE {
 			reply.Err = OK
-			if args.TransactionNum == 0 {
-				if kv.checkIsInTransaction(args.Key) {
-					reply.Err = ErrInTransaction
-				}
-			}
 		} else {
 			reply.Err = ErrWrongGroup
 		}
@@ -242,15 +255,11 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 							} else {
 								kv.mu.Lock()
 								if kv.ShardStatus[shard] == SERVE {
-									if kv.checkIsInTransaction(args.Key) {
-										reply.Err = ErrInTransaction
+									if value, prs := kv.LocalData[shard][args.Key]; prs {
+										reply.Value = value
+										reply.Err = OK
 									} else {
-										if value, prs := kv.LocalData[shard][args.Key]; prs {
-											reply.Value = value
-											reply.Err = OK
-										} else {
-											reply.Err = ErrNoKey
-										}
+										reply.Err = ErrNoKey
 									}
 								} else {
 									reply.Err = ErrWrongGroup
@@ -535,6 +544,7 @@ func (kv *ShardKV) Abort(args *AbortArgs, reply *AbortReply) {
 			OpType: TRANSACTION,
 			Transaction: TransactionStruct{
 				OpName:         ABORT,
+				Key:            args.Key,
 				ClientID:       args.ClientID,
 				ClientOpSeqNum: args.ClientLastOpSeqNum,
 				TransactionNum: args.TransactionNum,
@@ -661,12 +671,24 @@ func (kv *ShardKV) StartReceivedSucceed(args *RequestShardDataReply) bool {
 	thisOperation := Op{
 		OpType: RECEIVED_SHARD,
 		ReceivedShard: ReceivedShardStruct{
-			Shard:        args.Shard,
-			ConfigNum:    args.ConfigNum,
-			Data:         copyStrStrMap(args.Data),
-			LastOpSeqNum: copyInt64IntMap(args.LatestOpSeqNum),
+			Shard:             args.Shard,
+			ConfigNum:         args.ConfigNum,
+			Data:              copyStrStrMap(args.Data),
+			LastOpSeqNum:      copyInt64IntMap(args.LatestOpSeqNum),
+			ShadowData:        make(map[int]map[string]string),
+			ShadowDataCompare: make(map[int]map[string]string),
+			PreparedKeys:      copyStrIntMap(args.PreparedKeys),
 		},
 	}
+
+	for tnum, m := range args.ShadowData {
+		thisOperation.ReceivedShard.ShadowData[tnum] = copyStrStrMap(m)
+	}
+
+	for tnum, m := range args.ShadowDataCompare {
+		thisOperation.ReceivedShard.ShadowDataCompare[tnum] = copyStrStrMap(m)
+	}
+
 	kv.mu.Unlock()
 
 	newIndex, thisTerm, isLeader := kv.Rf.Start(thisOperation)
@@ -721,6 +743,22 @@ func (kv *ShardKV) RequestShardData(args *RequestShardDataArgs, reply *RequestSh
 				reply.ConfigNum = args.ConfigNum
 				reply.Data = copyStrStrMap(kv.PendingData[args.ConfigNum][args.Shard])
 				reply.LatestOpSeqNum = copyInt64IntMap(kv.PendingOpSeqNum[args.ConfigNum][args.Shard])
+
+				reply.PreparedKeys = make(map[string]int)
+				reply.ShadowData = make(map[int]map[string]string)
+				reply.ShadowDataCompare = make(map[int]map[string]string)
+				if _, prs := kv.PendingShadowData[args.ConfigNum]; prs {
+					if _, prs := kv.PendingPreparedKeys[args.ConfigNum]; prs {
+						reply.PreparedKeys = copyStrIntMap(kv.PendingPreparedKeys[args.ConfigNum])
+					}
+
+					for tnum, data := range kv.PendingShadowData[args.ConfigNum] {
+						if _, prs := data[args.Shard]; prs {
+							reply.ShadowData[tnum] = copyStrStrMap(kv.PendingShadowData[args.ConfigNum][tnum][args.Shard])
+							reply.ShadowDataCompare[tnum] = copyStrStrMap(kv.PendingShadowDataCompare[args.ConfigNum][tnum][args.Shard])
+						}
+					}
+				}
 
 				DPrintf("ShardKV %d at %d reply RequestShardData RPC from %d with OK. \n", kv.me, kv.gid, args.Gid)
 				return
@@ -851,7 +889,7 @@ func (kv *ShardKV) applyNewConfig(NewConfig shardmaster.Config) {
 		return
 	}
 
-	if len(kv.ReceivingShards) > 0 || len(kv.PreparedKeys) > 0 {
+	if len(kv.ReceivingShards) > 0 {
 		return
 	}
 
@@ -906,6 +944,26 @@ func (kv *ShardKV) applyNewConfig(NewConfig shardmaster.Config) {
 				}
 
 				if len(tnums) > 0 {
+					if _, prs := kv.PendingShadowData[NewConfig.Num-1]; !prs {
+						kv.PendingShadowData[NewConfig.Num-1] = make(map[int]map[int]map[string]string)
+						kv.PendingShadowDataCompare[NewConfig.Num-1] = make(map[int]map[int]map[string]string)
+					}
+
+					for _, tnum := range tnums {
+						if _, prs := kv.PendingShadowData[NewConfig.Num-1][tnum]; !prs {
+							kv.PendingShadowData[NewConfig.Num-1][tnum] = make(map[int]map[string]string)
+							kv.PendingShadowDataCompare[NewConfig.Num-1][tnum] = make(map[int]map[string]string)
+						}
+
+						if _, prs := kv.PendingShadowData[NewConfig.Num-1][tnum][i]; !prs {
+							kv.PendingShadowData[NewConfig.Num-1][tnum][i] = make(map[string]string)
+							kv.PendingShadowDataCompare[NewConfig.Num-1][tnum][i] = make(map[string]string)
+						}
+
+						kv.PendingShadowData[NewConfig.Num-1][tnum][i] = kv.ShadowData[tnum][i]
+						kv.PendingShadowDataCompare[NewConfig.Num-1][tnum][i] = kv.ShadowDataCompare[tnum][i]
+					}
+
 					for _, tnum := range tnums {
 						delete(kv.ShadowDataCompare[tnum], i)
 						delete(kv.ShadowData[tnum], i)
@@ -915,6 +973,23 @@ func (kv *ShardKV) applyNewConfig(NewConfig shardmaster.Config) {
 							delete(kv.ShadowData, tnum)
 						}
 					}
+				}
+
+				pkeys := make([]string, 0)
+				for key := range kv.PreparedKeys {
+					shard := key2shard(key)
+					if shard == i {
+						if _, prs := kv.PendingPreparedKeys[NewConfig.Num-1]; !prs {
+							kv.PendingPreparedKeys[NewConfig.Num-1] = make(map[string]int)
+						}
+
+						kv.PendingPreparedKeys[NewConfig.Num-1][key] = kv.PreparedKeys[key]
+						pkeys = append(pkeys, key)
+					}
+				}
+
+				for _, key := range pkeys {
+					delete(kv.PreparedKeys, key)
 				}
 			}
 		}
@@ -930,6 +1005,98 @@ func (kv *ShardKV) applyReceivedData(receivedShard ReceivedShardStruct) {
 	DPrintf("ShardKV %d at %d applied the received data at shard %d, config num %d. \n", kv.me, kv.gid, receivedShard.Shard, kv.ApplyingConfigNum)
 	kv.LocalData[receivedShard.Shard] = copyStrStrMap(receivedShard.Data)
 	kv.LatestClientOpSeqNum[receivedShard.Shard] = copyInt64IntMap(receivedShard.LastOpSeqNum)
+
+	for tnum := range receivedShard.ShadowData {
+		if _, prs := kv.ShadowData[tnum]; !prs {
+			kv.ShadowData[tnum] = make(map[int]map[string]string)
+			kv.ShadowDataCompare[tnum] = make(map[int]map[string]string)
+		}
+
+		kv.ShadowData[tnum][receivedShard.Shard] = copyStrStrMap(receivedShard.ShadowData[tnum])
+		kv.ShadowDataCompare[tnum][receivedShard.Shard] = copyStrStrMap(receivedShard.ShadowDataCompare[tnum])
+	}
+
+	for key := range receivedShard.PreparedKeys {
+		kv.PreparedKeys[key] = receivedShard.PreparedKeys[key]
+	}
+
+	for len(kv.DecisionQueue) > 0 {
+		decision := kv.DecisionQueue[0]
+		kv.DecisionQueue = kv.DecisionQueue[1:]
+
+		if decision.Op == COMMIT {
+			if _, prs := kv.PreparedKeys[decision.Key]; prs {
+				delete(kv.PreparedKeys, decision.Key)
+				value, prs := kv.ShadowData[decision.TransactionID][receivedShard.Shard][decision.Key]
+				if !prs {
+					value = ""
+				}
+
+				kv.LocalData[receivedShard.Shard][decision.Key] = value
+
+				delete(kv.ShadowData[decision.TransactionID][receivedShard.Shard], decision.Key)
+				delete(kv.ShadowDataCompare[decision.TransactionID][receivedShard.Shard], decision.Key)
+				if len(kv.ShadowData[decision.TransactionID][receivedShard.Shard]) == 0 {
+					delete(kv.ShadowData[decision.TransactionID], receivedShard.Shard)
+					delete(kv.ShadowDataCompare[decision.TransactionID], receivedShard.Shard)
+					if len(kv.ShadowData[decision.TransactionID]) == 0 {
+						delete(kv.ShadowData, decision.TransactionID)
+						delete(kv.ShadowDataCompare, decision.TransactionID)
+					}
+				}
+			}
+
+			if _, prs := kv.ShadowData[decision.TransactionID]; prs {
+				if _, prs := kv.ShadowData[decision.TransactionID][receivedShard.Shard]; prs {
+					if _, prs := kv.ShadowData[decision.TransactionID][receivedShard.Shard][decision.Key]; prs {
+						delete(kv.ShadowData[decision.TransactionID][receivedShard.Shard], decision.Key)
+						delete(kv.ShadowDataCompare[decision.TransactionID][receivedShard.Shard], decision.Key)
+						if len(kv.ShadowData[decision.TransactionID][receivedShard.Shard]) == 0 {
+							delete(kv.ShadowData[decision.TransactionID], receivedShard.Shard)
+							delete(kv.ShadowDataCompare[decision.TransactionID], receivedShard.Shard)
+							if len(kv.ShadowData[decision.TransactionID]) == 0 {
+								delete(kv.ShadowData, decision.TransactionID)
+								delete(kv.ShadowDataCompare, decision.TransactionID)
+							}
+						}
+					}
+				}
+			}
+		} else if decision.Op == ABORT {
+			if _, prs := kv.PreparedKeys[decision.Key]; prs {
+				delete(kv.PreparedKeys, decision.Key)
+
+				delete(kv.ShadowData[decision.TransactionID][receivedShard.Shard], decision.Key)
+				delete(kv.ShadowDataCompare[decision.TransactionID][receivedShard.Shard], decision.Key)
+				if len(kv.ShadowData[decision.TransactionID][receivedShard.Shard]) == 0 {
+					delete(kv.ShadowData[decision.TransactionID], receivedShard.Shard)
+					delete(kv.ShadowDataCompare[decision.TransactionID], receivedShard.Shard)
+					if len(kv.ShadowData[decision.TransactionID]) == 0 {
+						delete(kv.ShadowData, decision.TransactionID)
+						delete(kv.ShadowDataCompare, decision.TransactionID)
+					}
+				}
+			}
+
+			if _, prs := kv.ShadowData[decision.TransactionID]; prs {
+				if _, prs := kv.ShadowData[decision.TransactionID][receivedShard.Shard]; prs {
+					if _, prs := kv.ShadowData[decision.TransactionID][receivedShard.Shard][decision.Key]; prs {
+						delete(kv.ShadowData[decision.TransactionID][receivedShard.Shard], decision.Key)
+						delete(kv.ShadowDataCompare[decision.TransactionID][receivedShard.Shard], decision.Key)
+						if len(kv.ShadowData[decision.TransactionID][receivedShard.Shard]) == 0 {
+							delete(kv.ShadowData[decision.TransactionID], receivedShard.Shard)
+							delete(kv.ShadowDataCompare[decision.TransactionID], receivedShard.Shard)
+							if len(kv.ShadowData[decision.TransactionID]) == 0 {
+								delete(kv.ShadowData, decision.TransactionID)
+								delete(kv.ShadowDataCompare, decision.TransactionID)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	kv.ShardStatus[receivedShard.Shard] = SERVE
 	delete(kv.ReceivingShards, receivedShard.Shard)
 }
@@ -988,38 +1155,50 @@ func (kv *ShardKV) setUpPrepare(Ts TransactionStruct, reply *PrepareReply) {
 
 func (kv *ShardKV) commitKey(Ts TransactionStruct) {
 	shard := key2shard(Ts.Key)
-	if _, prs := kv.PreparedKeys[Ts.Key]; prs {
-		delete(kv.PreparedKeys, Ts.Key)
-		value, prs := kv.ShadowData[Ts.TransactionNum][shard][Ts.Key]
-		if !prs {
-			value = ""
+	if kv.ShardStatus[shard] == RECEIVING {
+
+		decision := Decision{
+			TransactionID: Ts.TransactionNum,
+			Key:           Ts.Key,
+			Op:            COMMIT,
 		}
+		kv.DecisionQueue = append(kv.DecisionQueue, decision)
 
-		kv.LocalData[shard][Ts.Key] = value
+	} else if kv.ShardStatus[shard] == SERVE {
 
-		delete(kv.ShadowData[Ts.TransactionNum][shard], Ts.Key)
-		delete(kv.ShadowDataCompare[Ts.TransactionNum][shard], Ts.Key)
-		if len(kv.ShadowData[Ts.TransactionNum][shard]) == 0 {
-			delete(kv.ShadowData[Ts.TransactionNum], shard)
-			delete(kv.ShadowDataCompare[Ts.TransactionNum], shard)
-			if len(kv.ShadowData[Ts.TransactionNum]) == 0 {
-				delete(kv.ShadowData, Ts.TransactionNum)
-				delete(kv.ShadowDataCompare, Ts.TransactionNum)
+		if _, prs := kv.PreparedKeys[Ts.Key]; prs {
+			delete(kv.PreparedKeys, Ts.Key)
+			value, prs := kv.ShadowData[Ts.TransactionNum][shard][Ts.Key]
+			if !prs {
+				value = ""
+			}
+
+			kv.LocalData[shard][Ts.Key] = value
+
+			delete(kv.ShadowData[Ts.TransactionNum][shard], Ts.Key)
+			delete(kv.ShadowDataCompare[Ts.TransactionNum][shard], Ts.Key)
+			if len(kv.ShadowData[Ts.TransactionNum][shard]) == 0 {
+				delete(kv.ShadowData[Ts.TransactionNum], shard)
+				delete(kv.ShadowDataCompare[Ts.TransactionNum], shard)
+				if len(kv.ShadowData[Ts.TransactionNum]) == 0 {
+					delete(kv.ShadowData, Ts.TransactionNum)
+					delete(kv.ShadowDataCompare, Ts.TransactionNum)
+				}
 			}
 		}
-	}
 
-	if _, prs := kv.ShadowData[Ts.TransactionNum]; prs {
-		if _, prs := kv.ShadowData[Ts.TransactionNum][shard]; prs {
-			if _, prs := kv.ShadowData[Ts.TransactionNum][shard][Ts.Key]; prs {
-				delete(kv.ShadowData[Ts.TransactionNum][shard], Ts.Key)
-				delete(kv.ShadowDataCompare[Ts.TransactionNum][shard], Ts.Key)
-				if len(kv.ShadowData[Ts.TransactionNum][shard]) == 0 {
-					delete(kv.ShadowData[Ts.TransactionNum], shard)
-					delete(kv.ShadowDataCompare[Ts.TransactionNum], shard)
-					if len(kv.ShadowData[Ts.TransactionNum]) == 0 {
-						delete(kv.ShadowData, Ts.TransactionNum)
-						delete(kv.ShadowDataCompare, Ts.TransactionNum)
+		if _, prs := kv.ShadowData[Ts.TransactionNum]; prs {
+			if _, prs := kv.ShadowData[Ts.TransactionNum][shard]; prs {
+				if _, prs := kv.ShadowData[Ts.TransactionNum][shard][Ts.Key]; prs {
+					delete(kv.ShadowData[Ts.TransactionNum][shard], Ts.Key)
+					delete(kv.ShadowDataCompare[Ts.TransactionNum][shard], Ts.Key)
+					if len(kv.ShadowData[Ts.TransactionNum][shard]) == 0 {
+						delete(kv.ShadowData[Ts.TransactionNum], shard)
+						delete(kv.ShadowDataCompare[Ts.TransactionNum], shard)
+						if len(kv.ShadowData[Ts.TransactionNum]) == 0 {
+							delete(kv.ShadowData, Ts.TransactionNum)
+							delete(kv.ShadowDataCompare, Ts.TransactionNum)
+						}
 					}
 				}
 			}
@@ -1028,20 +1207,48 @@ func (kv *ShardKV) commitKey(Ts TransactionStruct) {
 }
 
 func (kv *ShardKV) abortTransaction(Ts TransactionStruct) {
-	keys := make([]string, 0)
-	for key, tnum := range kv.PreparedKeys {
-		if tnum == Ts.TransactionNum {
-			keys = append(keys, key)
+	shard := key2shard(Ts.Key)
+	if kv.ShardStatus[shard] == RECEIVING {
+
+		decision := Decision{
+			TransactionID: Ts.TransactionNum,
+			Key:           Ts.Key,
+			Op:            ABORT,
 		}
-	}
+		kv.DecisionQueue = append(kv.DecisionQueue, decision)
 
-	for _, key := range keys {
-		delete(kv.PreparedKeys, key)
-	}
+	} else if kv.ShardStatus[shard] == SERVE {
+		if _, prs := kv.PreparedKeys[Ts.Key]; prs {
+			delete(kv.PreparedKeys, Ts.Key)
 
-	if _, prs := kv.ShadowData[Ts.TransactionNum]; prs {
-		delete(kv.ShadowData, Ts.TransactionNum)
-		delete(kv.ShadowDataCompare, Ts.TransactionNum)
+			delete(kv.ShadowData[Ts.TransactionNum][shard], Ts.Key)
+			delete(kv.ShadowDataCompare[Ts.TransactionNum][shard], Ts.Key)
+			if len(kv.ShadowData[Ts.TransactionNum][shard]) == 0 {
+				delete(kv.ShadowData[Ts.TransactionNum], shard)
+				delete(kv.ShadowDataCompare[Ts.TransactionNum], shard)
+				if len(kv.ShadowData[Ts.TransactionNum]) == 0 {
+					delete(kv.ShadowData, Ts.TransactionNum)
+					delete(kv.ShadowDataCompare, Ts.TransactionNum)
+				}
+			}
+		}
+
+		if _, prs := kv.ShadowData[Ts.TransactionNum]; prs {
+			if _, prs := kv.ShadowData[Ts.TransactionNum][shard]; prs {
+				if _, prs := kv.ShadowData[Ts.TransactionNum][shard][Ts.Key]; prs {
+					delete(kv.ShadowData[Ts.TransactionNum][shard], Ts.Key)
+					delete(kv.ShadowDataCompare[Ts.TransactionNum][shard], Ts.Key)
+					if len(kv.ShadowData[Ts.TransactionNum][shard]) == 0 {
+						delete(kv.ShadowData[Ts.TransactionNum], shard)
+						delete(kv.ShadowDataCompare[Ts.TransactionNum], shard)
+						if len(kv.ShadowData[Ts.TransactionNum]) == 0 {
+							delete(kv.ShadowData, Ts.TransactionNum)
+							delete(kv.ShadowDataCompare, Ts.TransactionNum)
+						}
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -1454,6 +1661,10 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.ShadowDataCompare = make(map[int]map[int]map[string]string)
 	kv.PreparedKeys = make(map[string]int)
 
+	kv.PendingShadowDataCompare = make(map[int]map[int]map[int]map[string]string)
+	kv.PendingShadowData = make(map[int]map[int]map[int]map[string]string)
+	kv.PendingPreparedKeys = make(map[int]map[string]int)
+	kv.DecisionQueue = make([]Decision, 0)
 	kv.shardMaster = shardmaster.MakeClerk(masters)
 
 	// Use something like this to talk to the shardmaster:
@@ -1496,6 +1707,10 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 	d.Decode(&kv.ShadowData)
 	d.Decode(&kv.ShadowDataCompare)
 	d.Decode(&kv.PreparedKeys)
+	d.Decode(&kv.PendingShadowData)
+	d.Decode(&kv.PendingShadowDataCompare)
+	d.Decode(&kv.PendingPreparedKeys)
+	d.Decode(&kv.DecisionQueue)
 }
 
 func (kv *ShardKV) createSnapshot() {
@@ -1512,6 +1727,10 @@ func (kv *ShardKV) createSnapshot() {
 	e.Encode(kv.ShadowData)
 	e.Encode(kv.ShadowDataCompare)
 	e.Encode(kv.PreparedKeys)
+	e.Encode(kv.PendingShadowData)
+	e.Encode(kv.PendingShadowDataCompare)
+	e.Encode(kv.PendingPreparedKeys)
+	e.Encode(kv.DecisionQueue)
 
 	kv.Rf.SaveSnapshot(w.Bytes())
 }

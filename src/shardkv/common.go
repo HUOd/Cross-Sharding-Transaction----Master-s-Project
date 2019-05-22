@@ -81,6 +81,7 @@ type CommitReply struct {
 type AbortArgs struct {
 	ClientID           int64
 	ClientLastOpSeqNum int
+	Key                string
 	TransactionNum     int
 }
 
@@ -106,9 +107,12 @@ type RequestShardDataArgs struct {
 }
 
 type RequestShardDataReply struct {
-	Err            Err
-	ConfigNum      int
-	Shard          int
-	Data           map[string]string
-	LatestOpSeqNum map[int64]int
+	Err               Err
+	ConfigNum         int
+	Shard             int
+	Data              map[string]string
+	LatestOpSeqNum    map[int64]int
+	ShadowData        map[int]map[string]string // TransactionNum -> key-value
+	ShadowDataCompare map[int]map[string]string // TransactionNum -> key-value
+	PreparedKeys      map[string]int
 }
