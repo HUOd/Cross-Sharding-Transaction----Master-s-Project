@@ -1,5 +1,8 @@
 package shardkv
 
+// Some of the algorithm or code logic in this file comes from the resource from internet:
+// https://github.com/wqlin/mit-6.824-2018/blob/solution/src/shardkv/server.go
+
 import "cst/src/shardmaster"
 import "cst/src/labrpc"
 import "cst/src/raft"
@@ -1446,6 +1449,7 @@ func (kv *ShardKV) runApplyOp() {
 	}
 }
 
+// The Logic of this function comes form internet resources: https://github.com/wqlin/mit-6.824-2018/blob/solution/src/shardkv/server.go
 func (kv *ShardKV) runCheckShardReceivingStatus() {
 
 	if _, isLeader := kv.Rf.GetState(); isLeader {
@@ -1499,11 +1503,13 @@ func (kv *ShardKV) runCheckTransactionTimeOut() {
 			}
 		}
 
-		for tnum := range tnums {
-			for _, data := range kv.ShadowDataCompare[tnum] {
-				for key := range data {
-					ts := TransactionStruct{TransactionNum: tnum, Key: key}
-					kv.abortTransaction(ts)
+		if len(tnums) > 0 {
+			for tnum := range tnums {
+				for _, data := range kv.ShadowDataCompare[tnum] {
+					for key := range data {
+						ts := TransactionStruct{TransactionNum: tnum, Key: key}
+						kv.abortTransaction(ts)
+					}
 				}
 			}
 		}
