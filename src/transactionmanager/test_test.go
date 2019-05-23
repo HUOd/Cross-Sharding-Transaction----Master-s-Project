@@ -86,7 +86,7 @@ func TestBasicFunctions(t *testing.T) {
 	// check(t, ck, ka[0], va[0])
 
 	cfg.join(1)
-	time.Sleep(1000 * time.Millisecond)
+	time.Sleep(2000 * time.Millisecond)
 
 	// check(t, ck, ka[0], va[0])
 

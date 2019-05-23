@@ -117,11 +117,12 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// common server's functional part
-	Killed                  bool
-	KillChan                chan struct{}
-	configTimer             *time.Timer
-	receivingTimer          *time.Timer
-	ReceivingShards         map[int]int                       // set for knowing which shard are receiving
+	Killed          bool
+	KillChan        chan struct{}
+	configTimer     *time.Timer
+	receivingTimer  *time.Timer
+	ReceivingShards map[int]int // set for knowing which shard are receiving
+	// The idea of creating a PendingData space idea comes from: https://github.com/wqlin/mit-6.824-2018/blob/solution/src/shardkv/server.go
 	PendingData             map[int]map[int]map[string]string // store the previous data from previous config  configNum -> shard -> key-value
 	PendingOpSeqNum         map[int]map[int]map[int64]int     // store the clientOp num from previous config  configNum -> shard -> clientID-clientSeqNum
 	shardMaster             *shardmaster.Clerk
