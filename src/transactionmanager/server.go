@@ -1046,8 +1046,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	tm.ClientLastOpSeqNum = make(map[int64]int)
 	tm.Transactions = make([]*Ts, 1)
 	// tm.masters = masters
-	clients := make([]*Clerk, 10)
-	for i := 0; i < 10; i++ {
+	clients := make([]*Clerk, 20)
+	for i := 0; i < 20; i++ {
 		clients[i] = MakeClerk(servers)
 	}
 	tm.ClientQ = newClientQ(clients)

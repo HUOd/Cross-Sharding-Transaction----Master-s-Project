@@ -1400,22 +1400,22 @@ func (kv *ShardKV) runApplyOp() {
 					prepareReply := &PrepareReply{}
 					kv.setUpPrepare(Ts, prepareReply)
 					reply.Err = prepareReply.Err
-					// kv.createSnapshot()
-					// go kv.Rf.LocalCompactSnapshot(am.CommandIndex)
+					kv.createSnapshot()
+					go kv.Rf.LocalCompactSnapshot(am.CommandIndex)
 				case COMMIT:
-					// kv.createSnapshot()
-					// go kv.Rf.LocalCompactSnapshot(am.CommandIndex)
+					kv.createSnapshot()
+					go kv.Rf.LocalCompactSnapshot(am.CommandIndex)
 
 					kv.commitKey(Ts)
 
-					// kv.createSnapshot()
-					// go kv.Rf.LocalCompactSnapshot(am.CommandIndex)
+					kv.createSnapshot()
+					go kv.Rf.LocalCompactSnapshot(am.CommandIndex)
 					reply.Err = OK
 				case ABORT:
 					kv.abortTransaction(Ts)
 					reply.Err = OK
-					// kv.createSnapshot()
-					// go kv.Rf.LocalCompactSnapshot(am.CommandIndex)
+					kv.createSnapshot()
+					go kv.Rf.LocalCompactSnapshot(am.CommandIndex)
 				}
 			}
 
