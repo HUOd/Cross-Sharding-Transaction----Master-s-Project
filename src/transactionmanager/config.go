@@ -54,6 +54,7 @@ type group struct {
 type config struct {
 	mu    sync.Mutex
 	t     *testing.T
+	b     *testing.B
 	net   *labrpc.Network
 	start time.Time // time at which make_config() was called
 
@@ -86,7 +87,7 @@ func (cfg *config) cleanup() {
 		cfg.ShutdownGroup(gi)
 	}
 	cfg.net.Cleanup()
-	cfg.checkTimeout()
+	// cfg.checkTimeout()
 }
 
 // check that no server's log is too big.
@@ -394,6 +395,61 @@ func make_config(t *testing.T, n int, unreliable bool, maxraftstate int) *config
 	runtime.GOMAXPROCS(4)
 	cfg := &config{}
 	cfg.t = t
+	cfg.maxraftstate = maxraftstate
+	cfg.net = labrpc.MakeNetwork()
+	cfg.start = time.Now()
+
+	// master
+	cfg.nmasters = 3
+	cfg.masterservers = make([]*shardmaster.ShardMaster, cfg.nmasters)
+	for i := 0; i < cfg.nmasters; i++ {
+		cfg.StartMasterServer(i)
+	}
+	cfg.mck = cfg.shardmasterclerk()
+
+	cfg.n = n
+	cfg.ShardKVclerks = make(map[*shardkv.Clerk][]string)
+	cfg.nextClientId = cfg.n + 1000 // client ids start 1000 above the highest serverid
+
+	// transactionmanager
+	cfg.ntmanagers = 3
+	cfg.tmanagerservers = make([]*TransactionManager, cfg.ntmanagers)
+	for i := 0; i < cfg.ntmanagers; i++ {
+		cfg.StartTManagerServer(i, 10)
+	}
+	cfg.tmanagerck = cfg.tmanagerclerk()
+
+	cfg.ngroups = 3
+	cfg.groups = make([]*group, cfg.ngroups)
+	// cfg.n = n
+	for gi := 0; gi < cfg.ngroups; gi++ {
+		gg := &group{}
+		cfg.groups[gi] = gg
+		gg.gid = 100 + gi
+		gg.servers = make([]*shardkv.ShardKV, cfg.n)
+		gg.saved = make([]*raft.Persister, cfg.n)
+		gg.endnames = make([][]string, cfg.n)
+		gg.mendnames = make([][]string, cfg.nmasters)
+		for i := 0; i < cfg.n; i++ {
+			cfg.StartKVServer(gi, i)
+		}
+	}
+
+	cfg.net.Reliable(!unreliable)
+
+	return cfg
+}
+
+func make_config_b(b *testing.B, n int, unreliable bool, maxraftstate int) *config {
+	ncpu_once.Do(func() {
+		if runtime.NumCPU() < 2 {
+			fmt.Printf("warning: only one CPU, which may conceal locking bugs\n")
+		}
+		rand.Seed(makeSeed())
+	})
+	runtime.GOMAXPROCS(4)
+	cfg := &config{}
+	cfg.b = b
 	cfg.maxraftstate = maxraftstate
 	cfg.net = labrpc.MakeNetwork()
 	cfg.start = time.Now()

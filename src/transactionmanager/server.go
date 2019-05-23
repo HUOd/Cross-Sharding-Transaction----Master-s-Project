@@ -1096,8 +1096,8 @@ func (cq *kvClientQ) deQkvClient() *shardkv.Clerk {
 func (cq *kvClientQ) enQkvClient(tc *shardkv.Clerk) {
 	cq.mu.Lock()
 	cq.clients = append(cq.clients, tc)
+	cq.cond.Broadcast()
 	cq.mu.Unlock()
-	cq.cond.Signal()
 }
 
 type clientQ struct {
@@ -1130,6 +1130,6 @@ func (cq *clientQ) deQClient() *Clerk {
 func (cq *clientQ) enQClient(tc *Clerk) {
 	cq.mu.Lock()
 	cq.clients = append(cq.clients, tc)
+	cq.cond.Broadcast()
 	cq.mu.Unlock()
-	cq.cond.Signal()
 }

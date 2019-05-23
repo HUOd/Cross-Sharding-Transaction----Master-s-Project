@@ -4,8 +4,10 @@ import "cst/src/labrpc"
 import "crypto/rand"
 import "math/big"
 import "time"
+import "sync"
 
 var ClientsIDSet = make(map[int64]bool)
+var gm sync.Mutex
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
@@ -26,12 +28,18 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// Your code here.
 	ck.ClientID = nrand()
+	gm.Lock()
 	_, prs := ClientsIDSet[ck.ClientID]
+	gm.Unlock()
 	for prs {
 		ck.ClientID = nrand()
+		gm.Lock()
 		_, prs = ClientsIDSet[ck.ClientID]
+		gm.Unlock()
 	}
+	gm.Lock()
 	ClientsIDSet[ck.ClientID] = true
+	gm.Unlock()
 	ck.LastOpSeqNum = 0
 
 	return ck
