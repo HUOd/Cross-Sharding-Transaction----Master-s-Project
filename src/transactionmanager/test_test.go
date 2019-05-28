@@ -261,7 +261,7 @@ func BenchmarkReadWriteTransactions(b *testing.B) {
 		}(i)
 	}
 
-	total := n
+	total := b.N
 	for total > 0 {
 		<-nChan
 		total--

@@ -1395,27 +1395,36 @@ func (kv *ShardKV) runApplyOp() {
 				}
 			} else if operation.OpType == TRANSACTION {
 				Ts := operation.Transaction
-				switch Ts.OpName {
-				case PREPARE:
-					prepareReply := &PrepareReply{}
-					kv.setUpPrepare(Ts, prepareReply)
-					reply.Err = prepareReply.Err
-					kv.createSnapshot()
-					go kv.Rf.LocalCompactSnapshot(am.CommandIndex)
-				case COMMIT:
-					kv.createSnapshot()
-					go kv.Rf.LocalCompactSnapshot(am.CommandIndex)
+				shard := key2shard(Ts.Key)
+				lsn, prs := kv.LatestClientOpSeqNum[shard][Ts.ClientID]
 
-					kv.commitKey(Ts)
+				if !prs || (prs && lsn < Ts.ClientOpSeqNum) {
+					switch Ts.OpName {
+					case PREPARE:
+						prepareReply := &PrepareReply{}
+						kv.setUpPrepare(Ts, prepareReply)
+						reply.Err = prepareReply.Err
+						kv.createSnapshot()
+						go kv.Rf.LocalCompactSnapshot(am.CommandIndex)
+					case COMMIT:
+						kv.createSnapshot()
+						go kv.Rf.LocalCompactSnapshot(am.CommandIndex)
 
-					kv.createSnapshot()
-					go kv.Rf.LocalCompactSnapshot(am.CommandIndex)
+						kv.commitKey(Ts)
+
+						kv.createSnapshot()
+						go kv.Rf.LocalCompactSnapshot(am.CommandIndex)
+						reply.Err = OK
+					case ABORT:
+						kv.abortTransaction(Ts)
+						reply.Err = OK
+						kv.createSnapshot()
+						go kv.Rf.LocalCompactSnapshot(am.CommandIndex)
+					}
+
+					kv.LatestClientOpSeqNum[shard][Ts.ClientID] = Ts.ClientOpSeqNum
+				} else {
 					reply.Err = OK
-				case ABORT:
-					kv.abortTransaction(Ts)
-					reply.Err = OK
-					kv.createSnapshot()
-					go kv.Rf.LocalCompactSnapshot(am.CommandIndex)
 				}
 			}
 
