@@ -287,9 +287,7 @@ func (ck *Clerk) Prepare(key string, TransactionNum int) (bool, Err) {
 				if ok && reply.WrongLeader == false && reply.Err == OK {
 					return true, OK
 				}
-				if ok && reply.Err == ErrWrongGroup {
-					return false, ErrWrongGroup
-				}
+
 				if ok && reply.WrongLeader == false && reply.Err != OK {
 					return false, reply.Err
 				}

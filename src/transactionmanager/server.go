@@ -129,6 +129,7 @@ type GeneralReply struct {
 
 func (tm *TransactionManager) Get(args *GetArgs, reply *GetReply) {
 	DPrintf("TransactionManager %d received Get Request for Transaction %d from Client %d. \n", tm.me, args.TransactionID, args.ClientID)
+
 	thisOperation := Op{
 		OpType: CLIENT_OP,
 		ClientOp: ClientOpStruct{
@@ -227,6 +228,7 @@ func (tm *TransactionManager) Get(args *GetArgs, reply *GetReply) {
 
 func (tm *TransactionManager) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	DPrintf("TransactionManager %d received %v Request for Transaction %d from Client %d. \n", tm.me, args.Op, args.TransactionID, args.ClientID)
+
 	thisOperation := Op{
 		OpType: CLIENT_OP,
 		ClientOp: ClientOpStruct{
@@ -386,6 +388,14 @@ func (tm *TransactionManager) Begin(args *BeginArgs, reply *BeginReply) {
 
 func (tm *TransactionManager) Commit(args *CommitArgs, reply *CommitReply) {
 	DPrintf("TransactionManager %d received Commit Request for Transaction %d from Client %d. \n", tm.me, args.TransactionID, args.ClientID)
+
+	tm.mu.Lock()
+	if tm.Transactions[args.TransactionID].State != ActiveState {
+		tm.mu.Unlock()
+		return
+	}
+	tm.mu.Unlock()
+
 	thisOperation := Op{
 		OpType: TS_OP,
 		TsOp: TransactionOpStruct{
@@ -420,29 +430,29 @@ func (tm *TransactionManager) Commit(args *CommitArgs, reply *CommitReply) {
 
 					total := len(keys)
 					votes := 0
+					voteChan := make(chan bool)
 					for _, key := range keys {
-						skv := tm.shardKVClientQ.deQkvClient()
-						res, err := skv.Prepare(key, args.TransactionID)
-						tm.shardKVClientQ.enQkvClient(skv)
-						if err != OK {
-							DPrintf("TransactionManager %d received reply of Prepare with Err %v, will abort Transaction %d. \n", tm.me, err, args.TransactionID)
-							client := tm.ClientQ.deQClient()
-							client.Abort(args.TransactionID)
-							tm.ClientQ.enQClient(client)
-							reply.Err = Err(err)
-							break
-						} else {
-							if res {
-								votes++
+						go func(key string) {
+							skv := tm.shardKVClientQ.deQkvClient()
+							DPrintf("TransactionManager %d sent Prepare requests for Transaction %d. \n", tm.me, args.TransactionID)
+							res, err := skv.Prepare(key, args.TransactionID)
+							tm.shardKVClientQ.enQkvClient(skv)
+							if err == OK {
+								if res {
+									voteChan <- true
+								} else {
+									voteChan <- false
+								}
 							} else {
-								DPrintf("TransactionManager %d received reply of Prepare vote NO, will abort Transaction %d. \n", tm.me, args.TransactionID)
-								client := tm.ClientQ.deQClient()
-								client.Abort(args.TransactionID)
-								tm.ClientQ.enQClient(client)
-
-								reply.Err = ErrAbort
-								break
+								DPrintf("TransactionManager %d received reply of Prepare with Err %v, will abort Transaction %d. \n", tm.me, err, args.TransactionID)
+								voteChan <- false
 							}
+						}(key)
+					}
+
+					for i := 0; i < total; i++ {
+						if <-voteChan {
+							votes++
 						}
 					}
 
@@ -451,22 +461,42 @@ func (tm *TransactionManager) Commit(args *CommitArgs, reply *CommitReply) {
 						client := tm.ClientQ.deQClient()
 						client.UpdateState(args.TransactionID, PrepareState)
 						tm.ClientQ.enQClient(client)
-						for _, key := range keys {
-							skv := tm.shardKVClientQ.deQkvClient()
-							res, _ := skv.Commit(key, args.TransactionID)
-							tm.shardKVClientQ.enQkvClient(skv)
 
-							if !res {
-								client := tm.ClientQ.deQClient()
-								client.AddBlockKey(args.TransactionID, key, COMMIT)
-								tm.ClientQ.enQClient(client)
-							}
+						rChan := make(chan struct{})
+						for _, key := range keys {
+
+							go func(key string) {
+								skv := tm.shardKVClientQ.deQkvClient()
+								res, _ := skv.Commit(key, args.TransactionID)
+								tm.shardKVClientQ.enQkvClient(skv)
+
+								if !res {
+									client := tm.ClientQ.deQClient()
+									client.AddBlockKey(args.TransactionID, key, COMMIT)
+									tm.ClientQ.enQClient(client)
+								}
+								rChan <- struct{}{}
+							}(key)
 						}
+
+						for total > 0 {
+							<-rChan
+							total--
+						}
+
 						client = tm.ClientQ.deQClient()
 						client.UpdateState(args.TransactionID, CommitState)
 						tm.ClientQ.enQClient(client)
 						reply.Err = OK
 						DPrintf("TransactionManager %d Commit Complete on Transaction %d. \n", tm.me, args.TransactionID)
+					} else {
+						DPrintf("TransactionManager %d received reply of Prepare vote NO, will abort Transaction %d. \n", tm.me, args.TransactionID)
+						client := tm.ClientQ.deQClient()
+						client.Abort(args.TransactionID)
+						tm.ClientQ.enQClient(client)
+
+						reply.Err = ErrAbort
+						break
 					}
 
 				} else {
@@ -493,6 +523,14 @@ func (tm *TransactionManager) Commit(args *CommitArgs, reply *CommitReply) {
 
 func (tm *TransactionManager) Abort(args *AbortArgs, reply *AbortReply) {
 	DPrintf("TransactionManager %d received Abort Request for Transaction %d from Client %d. \n", tm.me, args.TransactionID, args.ClientID)
+
+	tm.mu.Lock()
+	if tm.Transactions[args.TransactionID].State == AbortState {
+		tm.mu.Unlock()
+		return
+	}
+	tm.mu.Unlock()
+
 	thisOperation := Op{
 		OpType: TS_OP,
 		TsOp: TransactionOpStruct{
@@ -526,21 +564,30 @@ func (tm *TransactionManager) Abort(args *AbortArgs, reply *AbortReply) {
 						keys = append(keys, key)
 					}
 
+					rChan := make(chan struct{})
+					total := len(keys)
 					for _, key := range keys {
+						go func(key string) {
+							skv := tm.shardKVClientQ.deQkvClient()
+							DPrintf("TransactionManager %d send Abort the Transaction %d to kvclient %d. \n", tm.me, args.TransactionID, skv.ClientID)
+							res, _ := skv.Abort(key, args.TransactionID)
+							tm.shardKVClientQ.enQkvClient(skv)
 
-						skv := tm.shardKVClientQ.deQkvClient()
-						DPrintf("TransactionManager %d send Abort the Transaction %d to kvclient %d. \n", tm.me, args.TransactionID, skv.ClientID)
-						res, _ := skv.Abort(key, args.TransactionID)
-						tm.shardKVClientQ.enQkvClient(skv)
-
-						if !res {
-							client := tm.ClientQ.deQClient()
-							client.AddBlockKey(args.TransactionID, key, ABORT)
-							tm.ClientQ.enQClient(client)
-						}
+							if !res {
+								client := tm.ClientQ.deQClient()
+								client.AddBlockKey(args.TransactionID, key, ABORT)
+								tm.ClientQ.enQClient(client)
+							}
+							rChan <- struct{}{}
+						}(key)
 					}
 
-					ts.KeyToGid = make(map[string]int)
+					for total > 0 {
+						<-rChan
+						total--
+					}
+
+					reply.Err = OK
 					DPrintf("TransactionManager %d Abort the Transaction %d. \n", tm.me, args.TransactionID)
 				} else {
 					DPrintf("TransactionManager %d is no longer the leader. \n", tm.me)

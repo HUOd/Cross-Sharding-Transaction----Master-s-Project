@@ -227,7 +227,7 @@ func BenchmarkReadWriteTransactions(b *testing.B) {
 	}
 
 	// many Trnasactions with commit on different keys
-	b.N = 10
+	b.N = 20
 	nChan := make(chan struct{})
 	for i := 0; i < b.N; i++ {
 		// mmChan := make(chan string)
@@ -247,7 +247,9 @@ func BenchmarkReadWriteTransactions(b *testing.B) {
 				b.Fatalf("Got err %v from t %d. \n", err, tx)
 			}
 
+			fmt.Printf("Try Commit Transaction %d.\n", tx)
 			err = tck.Commit(tx)
+			fmt.Printf("Committed Transaction %d completed!\n", tx)
 
 			if err != OK {
 				b.Fatalf("Got err %v from t %d. \n", err, tx)
@@ -341,7 +343,9 @@ func BenchmarkRWTransactionsShards(b *testing.B) {
 				b.Fatalf("Got err %v from t %d. \n", err, tx)
 			}
 
+			fmt.Printf("Try Commit Transaction %d.\n", tx)
 			err = tck.Commit(tx)
+			fmt.Printf("Committed Transaction %d completed!\n", tx)
 
 			if err != OK {
 				b.Fatalf("Got err %v from t %d. \n", err, tx)
