@@ -1361,7 +1361,7 @@ func (kv *ShardKV) runApplyOp() {
 								}
 
 								kv.LatestClientOpSeqNum[shard][cOp.ClientID] = cOp.ClientOpSeqNum
-								DPrintf("ShardKV %d at %d applied the client requets %v at index %d. \n", kv.me, kv.gid, cOp.OpName, am.CommandIndex)
+								// DPrintf("ShardKV %d at %d applied the client requets %v at index %d. \n", kv.me, kv.gid, cOp.OpName, am.CommandIndex)
 							}
 							reply.Err = OK
 						} else {
@@ -1377,7 +1377,7 @@ func (kv *ShardKV) runApplyOp() {
 									}
 
 									kv.LatestClientOpSeqNum[shard][cOp.ClientID] = cOp.ClientOpSeqNum
-									DPrintf("ShardKV %d at %d applied the client requets %v at index %d. \n", kv.me, kv.gid, cOp.OpName, am.CommandIndex)
+									// DPrintf("ShardKV %d at %d applied the client requets %v at index %d. \n", kv.me, kv.gid, cOp.OpName, am.CommandIndex)
 									reply.Err = OK
 								}
 							} else {

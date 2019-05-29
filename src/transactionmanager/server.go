@@ -165,28 +165,36 @@ func (tm *TransactionManager) Get(args *GetArgs, reply *GetReply) {
 						tm.shardKVClientQ.enQkvClient(skv)
 						if err != OK {
 							DPrintf("TransactionManager %d received reply of Get with Err %v, will abort Transaction %d. \n", tm.me, args.ClientID, err, args.TransactionID)
-							client := tm.ClientQ.deQClient()
-							reply.Err = client.Update(args.TransactionID, args.Key, gid)
-							tm.ClientQ.enQClient(client)
 
-							client = tm.ClientQ.deQClient()
-							client.Abort(args.TransactionID)
-							tm.ClientQ.enQClient(client)
-							reply.Err = Err(err)
+							go func() {
+								client := tm.ClientQ.deQClient()
+								client.Update(args.TransactionID, args.Key, gid)
+								tm.ClientQ.enQClient(client)
+
+								client = tm.ClientQ.deQClient()
+								client.Abort(args.TransactionID)
+								tm.ClientQ.enQClient(client)
+							}()
+
+							reply.Err = ErrAbort
 							return
 						}
 
 						if preGid, prs := ts.KeyToGid[args.Key]; prs {
 							if preGid != gid {
 								DPrintf("TransactionManager %d received reply of Get, gid not match, prevGid %d curGid %d, will abort Transaction %d. \n", tm.me, args.ClientID, preGid, gid, args.TransactionID)
-								client := tm.ClientQ.deQClient()
-								reply.Err = client.Update(args.TransactionID, args.Key, gid)
-								tm.ClientQ.enQClient(client)
 
-								client = tm.ClientQ.deQClient()
-								client.Abort(args.TransactionID)
-								tm.ClientQ.enQClient(client)
-								reply.Err = ErrConfigChanged
+								go func() {
+									client := tm.ClientQ.deQClient()
+									client.Update(args.TransactionID, args.Key, gid)
+									tm.ClientQ.enQClient(client)
+
+									client = tm.ClientQ.deQClient()
+									client.Abort(args.TransactionID)
+									tm.ClientQ.enQClient(client)
+								}()
+
+								reply.Err = ErrAbort
 								return
 							}
 							reply.Err = OK
@@ -273,29 +281,35 @@ func (tm *TransactionManager) PutAppend(args *PutAppendArgs, reply *PutAppendRep
 
 						if err != OK {
 							DPrintf("TransactionManager %d received reply of %v with Err %v, will abort Transaction %d. \n", tm.me, args.ClientID, args.Op, err, args.TransactionID)
-							client := tm.ClientQ.deQClient()
-							reply.Err = client.Update(args.TransactionID, args.Key, gid)
-							tm.ClientQ.enQClient(client)
 
-							client = tm.ClientQ.deQClient()
-							client.Abort(args.TransactionID)
-							tm.ClientQ.enQClient(client)
-							reply.Err = Err(err)
+							go func() {
+								client := tm.ClientQ.deQClient()
+								client.Update(args.TransactionID, args.Key, gid)
+								tm.ClientQ.enQClient(client)
+
+								client = tm.ClientQ.deQClient()
+								client.Abort(args.TransactionID)
+								tm.ClientQ.enQClient(client)
+							}()
+
+							reply.Err = ErrAbort
 							return
 						}
 
 						if preGid, prs := ts.KeyToGid[args.Key]; prs {
 							if preGid != gid {
 								DPrintf("TransactionManager %d received reply of %v, gid not match, prevGid %d curGid %d, will abort Transaction %d. \n", tm.me, args.ClientID, args.Op, preGid, gid, args.TransactionID)
+								go func() {
+									client := tm.ClientQ.deQClient()
+									client.Update(args.TransactionID, args.Key, gid)
+									tm.ClientQ.enQClient(client)
 
-								client := tm.ClientQ.deQClient()
-								reply.Err = client.Update(args.TransactionID, args.Key, gid)
-								tm.ClientQ.enQClient(client)
+									client = tm.ClientQ.deQClient()
+									client.Abort(args.TransactionID)
+									tm.ClientQ.enQClient(client)
+								}()
 
-								client = tm.ClientQ.deQClient()
-								client.Abort(args.TransactionID)
-								tm.ClientQ.enQClient(client)
-								reply.Err = ErrConfigChanged
+								reply.Err = ErrAbort
 								return
 							}
 							reply.Err = OK
@@ -491,12 +505,14 @@ func (tm *TransactionManager) Commit(args *CommitArgs, reply *CommitReply) {
 						DPrintf("TransactionManager %d Commit Complete on Transaction %d. \n", tm.me, args.TransactionID)
 					} else {
 						DPrintf("TransactionManager %d received reply of Prepare vote NO, will abort Transaction %d. \n", tm.me, args.TransactionID)
-						client := tm.ClientQ.deQClient()
-						client.Abort(args.TransactionID)
-						tm.ClientQ.enQClient(client)
+
+						go func() {
+							client := tm.ClientQ.deQClient()
+							client.Abort(args.TransactionID)
+							tm.ClientQ.enQClient(client)
+						}()
 
 						reply.Err = ErrAbort
-						break
 					}
 
 				} else {

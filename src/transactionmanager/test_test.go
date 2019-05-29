@@ -169,7 +169,7 @@ func BenchmarkReadOnlyTransactions(b *testing.B) {
 
 	// many Trnasactions with commit on different keys
 	nChan := make(chan struct{})
-	b.N = 10
+	b.N = 20
 	for i := 0; i < b.N; i++ {
 		// mmChan := make(chan string)
 		go func(ix int) {
@@ -177,12 +177,17 @@ func BenchmarkReadOnlyTransactions(b *testing.B) {
 			tx, _ := tck.Begin()
 			index := ix % n
 			_, err := tck.Get(ka[index], tx)
-			if err != OK {
-				b.Fatalf("Got err %v from t %d. \n", err, tx)
+			if err == ErrAbort {
+				nChan <- struct{}{}
+				return
 			}
 
 			err = tck.Commit(tx)
 			if err != OK {
+				if err == ErrAbort {
+					nChan <- struct{}{}
+					return
+				}
 				b.Fatalf("Got err %v from t %d. \n", err, tx)
 			}
 
@@ -236,28 +241,34 @@ func BenchmarkReadWriteTransactions(b *testing.B) {
 			tx, _ := tck.Begin()
 			index := ix % n
 			newV, err := tck.Get(ka[index], tx)
-			if err != OK {
-				b.Fatalf("Got err %v from t %d. \n", err, tx)
+			if err == ErrAbort {
+				nChan <- struct{}{}
+				return
 			}
 
 			newV += randstring(20)
 
 			err = tck.Put(ka[index], newV, tx)
-			if err != OK {
-				b.Fatalf("Got err %v from t %d. \n", err, tx)
+			if err == ErrAbort {
+				nChan <- struct{}{}
+				return
 			}
 
-			fmt.Printf("Try Commit Transaction %d.\n", tx)
+			//fmt.Printf("Try Commit Transaction %d.\n", tx)
 			err = tck.Commit(tx)
-			fmt.Printf("Committed Transaction %d completed!\n", tx)
+			// fmt.Printf("Committed Transaction %d completed!\n", tx)
 
 			if err != OK {
+				if err == ErrAbort {
+					nChan <- struct{}{}
+					return
+				}
 				b.Fatalf("Got err %v from t %d. \n", err, tx)
 			}
 
 			nChan <- struct{}{}
 			// check_b(b, ck, ka[ix], newV)
-			ck.Put(ka[index], va[index])
+			// ck.Put(ka[index], va[index])
 		}(i)
 	}
 
@@ -297,7 +308,7 @@ func BenchmarkRWTransactionsShards(b *testing.B) {
 	}
 
 	// many Trnasactions with commit on different keys
-	b.N = 10
+	b.N = 20
 	nChan := make(chan struct{})
 	for i := 0; i < b.N; i++ {
 		// mmChan := make(chan string)
@@ -306,41 +317,47 @@ func BenchmarkRWTransactionsShards(b *testing.B) {
 			tx, _ := tck.Begin()
 			index := ix % n
 			newV, err := tck.Get(ka[index], tx)
-			if err != OK {
-				b.Fatalf("Got err %v from t %d. \n", err, tx)
+			if err == ErrAbort {
+				nChan <- struct{}{}
+				return
 			}
 
 			newV += randstring(20)
 
 			err = tck.Put(ka[index], newV, tx)
-			if err != OK {
-				b.Fatalf("Got err %v from t %d. \n", err, tx)
+			if err == ErrAbort {
+				nChan <- struct{}{}
+				return
 			}
 
 			index = (index + 1) % n
 			newV, err = tck.Get(ka[index], tx)
-			if err != OK {
-				b.Fatalf("Got err %v from t %d. \n", err, tx)
+			if err == ErrAbort {
+				nChan <- struct{}{}
+				return
 			}
 
 			newV += randstring(20)
 
 			err = tck.Put(ka[index], newV, tx)
-			if err != OK {
-				b.Fatalf("Got err %v from t %d. \n", err, tx)
+			if err == ErrAbort {
+				nChan <- struct{}{}
+				return
 			}
 
 			index = (index + 2) % n
 			newV, err = tck.Get(ka[index], tx)
-			if err != OK {
-				b.Fatalf("Got err %v from t %d. \n", err, tx)
+			if err == ErrAbort {
+				nChan <- struct{}{}
+				return
 			}
 
 			newV += randstring(20)
 
 			err = tck.Put(ka[index], newV, tx)
-			if err != OK {
-				b.Fatalf("Got err %v from t %d. \n", err, tx)
+			if err == ErrAbort {
+				nChan <- struct{}{}
+				return
 			}
 
 			fmt.Printf("Try Commit Transaction %d.\n", tx)
@@ -348,6 +365,10 @@ func BenchmarkRWTransactionsShards(b *testing.B) {
 			fmt.Printf("Committed Transaction %d completed!\n", tx)
 
 			if err != OK {
+				if err == ErrAbort {
+					nChan <- struct{}{}
+					return
+				}
 				b.Fatalf("Got err %v from t %d. \n", err, tx)
 			}
 
@@ -357,7 +378,7 @@ func BenchmarkRWTransactionsShards(b *testing.B) {
 		}(i)
 	}
 
-	total := n
+	total := b.N
 	for total > 0 {
 		<-nChan
 		total--
